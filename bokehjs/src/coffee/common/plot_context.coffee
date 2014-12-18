@@ -1,36 +1,29 @@
 
 define [
   "underscore",
-  "backbone",
+  "./collection",
   "./build_views",
-  "./safebind",
   "./has_parent"
   "./continuum_view",
-], (_, Backbone, build_views, safebind, HasParent, ContinuumView) ->
+], (_, Collection, build_views, HasParent, ContinuumView) ->
 
-  class PlotContextView extends ContinuumView.View
+  class PlotContextView extends ContinuumView
     initialize: (options) ->
       @views = {}
-      @views_rendered = [false]
       @child_models = []
       super(options)
       @render()
 
     delegateEvents: () ->
-      safebind(this, @model, 'destroy', @remove)
-      safebind(this, @model, 'change', @render)
+      @listenTo(@model, 'destroy', @remove)
+      @listenTo(@model, 'change', @render)
       super()
 
     build_children: () ->
-      created_views = build_views(@views, @mget_obj('children'), {})
+      created_views = build_views(@views, @mget('children'), {})
       window.pc_created_views = created_views
       window.pc_views = @views
       return null
-
-    events:
-      #'click .jsp': 'newtab'
-      'click .plotclose': 'removeplot'
-      'click .closeall': 'closeall'
 
     size_textarea: (textarea) ->
       scrollHeight = $(textarea).height(0).prop('scrollHeight')
@@ -42,7 +35,7 @@ define [
 
     removeplot: (e) =>
       plotnum = parseInt($(e.currentTarget).parent().attr('data-plot_num'))
-      s_pc = @model.resolve_ref(@mget('children')[plotnum])
+      s_pc = @mget('children')[plotnum]
       view = @views[s_pc.get('id')]
       view.remove();
       newchildren = (x for x in @mget('children') when x.id != view.model.id)
@@ -57,16 +50,12 @@ define [
         val.$el.detach()
       @$el.html('')
       numplots = _.keys(@views).length
-      @$el.append("<div>You have #{numplots} plots</div>")
-      @$el.append("<div><a class='closeall' href='#'>Close All Plots</a></div>")
-      @$el.append("<br/>")
       to_render = []
       tab_names = {}
       for modelref, index in @mget('children')
         view = @views[modelref.id]
-        node = $("<div class='jsp' data-plot_num='#{index}'></div>"  )
+        node = $("<div class='jsp' data-plot_num='#{index}'></div>")
         @$el.append(node)
-        node.append($("<a class='plotclose'>[close]</a>"))
         node.append(view.el)
       _.defer(() =>
         for textarea in @$el.find('.plottitle')
@@ -81,13 +70,12 @@ define [
     url: () ->
       return super()
 
-    defaults: () ->
-      return {
+    defaults: ->
+      return _.extend {}, super(), {
         children: []
-        render_loop: true
-      } 
+      }
 
-  class PlotContexts extends Backbone.Collection
+  class PlotContexts extends Collection
     model: PlotContext
 
   return {

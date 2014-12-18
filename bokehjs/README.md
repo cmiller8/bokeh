@@ -1,110 +1,28 @@
-bokehjs
-=======
+<img src="http://i.imgur.com/TMKcgIV.png" width="35" height="35"> BokehJS
+=========================================================================
 
-About
-=====
+BokehJS is a front-end JavaScript library for [Bokeh](http://github.com/bokeh/bokeh).
 
-BokehJS is designed to be a front-end library for
-[Bokeh](http://github.com/ContinuumIO/bokeh).  The architecture of the library
-facilitates easy manipulation of the components and configuration of a plot
-from the server side.
-
-However, it can be used directly from Javascript, without a Plot Server, and
-with all its data embedded directly into the page.  All of the examples in
-the `demo/` directory showcase this.
-
-Requirements
-============
-
-1. You need to have node.js and and the node package manager (npm)
-installed.
-
-2. We're using Grunt for our Coffeescript build tool.  Grunt will compile
-coffeescript, combine js files, and support node.js require syntax on the
-client side.  Install grunt by executing
-
-`$ npm install -g grunt-cli`
-
-3. We're using bower to manage client dependencies. Install bower by
-executing:
-
-`$ npm install -g bower`
+The architecture of the library facilitates easy manipulation of the components
+and configuration of a plot from server-side code in python or other languages.
+However, BokehJS can also be used directly as a standalone JavaScript library,
+with plot data embedded directly into the page, retrieved via AJAX calls, or
+supplied by a separate Bokeh Plot server.
 
 Building
-========
+--------
 
-In order to build the javascript files that comprise bokeh.js, first install
-necessary dependencies:
+Please refer to the [BokehJS section](http://bokeh.pydata.org/docs/dev_guide.html#bokehjs)
+of the [Bokeh Developer Guide](http://bokeh.pydata.org/docs/dev_guide.html)
+for information about building, testing and demoing BokehJS.
 
-`$ npm install && bower install`
+Contributing
+------------
 
-These command will install compile and runtime dependencies into node_modules
-and build subdirectories, respectively.
-
-To compile the Coffeescript into javascript, execute grunt:
-
-`$ grunt build`
-
-At this point bokeh can be be used as an AMD module together with require.js.
-To build a single bokeh.js that may be included as a script, see the section
-"Deploying".
-
-Deploying
-=========
-
-Grunt can concatenate the javascript files into a single bokeh.js, either
-minified or unminified. To generate a minified script, execute the
-command:
-
-`$ grunt deploy`
-
-The resulting script will have the filename bokeh.min.js and be located in
-the build subdirectory.
-
-To generate an un-minified script, (useful for debugging or developing
-bokehjs), execute the command:
-
-`$ grunt devdeploy`
-
-The resulting script will have the filename bokeh.js and be located in
-the build subdirectory.
-
-In both cases, the script creates a top level module "Bokeh" that exposes
-the full API.
-
-Demoing
-=======
-
-Executing "grunt build" will also cause the demo files to be built and copied
-the build/demo subdirectory. To view the demos, simply open any of the html
-files located there in a browser.
-
-Testing
-=======
-
-In order to run the bokehjs tests, a web server must first be running at the
-top level. One simple way is to use the server built into python:
-
-`$ python -m SimpleHTTPServer`
-
-Once a webserver is running, the tests may be run explicitly by executing
-the command
-
-`$ grunt qunit`
-
-or may be run as part of the default grunt target (which also builds), by
-executing the command
-
-`$ grunt`
-
-Developing & Contributing
-=========================
-
-The project is very new but is already quite useful.  We always appreciate
-feedback and value contributions.  The core developers are working hard towards
-applying Bokeh and BokehJS towards some specific projects, so the dev priorities
-will tend to center around those tasks, until the project reaches a point of
-stability.  It should be considered alpha software at this point.
+We always appreciate feedback and value contributions.  The core developers are
+working hard towards applying Bokeh and BokehJS towards some specific projects,
+so the development priorities will tend to center around those tasks, until the
+project reaches a point of stability.
 
 Please join the discussion on the [Bokeh mailing list](https://groups.google.com/a/continuum.io/forum/#!forum/bokeh).
 

@@ -1,14 +1,16 @@
-
-import os
+from __future__ import print_function
 
 import numpy as np
 import pandas as pd
 
-from bokeh.objects import (
-    ColumnDataSource, Glyph, Grid, GridPlot, LinearAxis, Plot, Range1d
+from bokeh.browserlib import view
+from bokeh.document import Document
+from bokeh.embed import file_html
+from bokeh.models.glyphs import Circle, Line
+from bokeh.models import (
+    ColumnDataSource, Grid, GridPlot, LinearAxis, Plot, Range1d
 )
-from bokeh.glyphs import Circle, Line
-from bokeh import session
+from bokeh.resources import INLINE
 
 raw_columns=[
 [10.0,   8.04,   10.0,   9.14,   10.0,   7.46,   8.0,    6.58],
@@ -49,47 +51,45 @@ ydr = Range1d(start=-0.5, end=20.5)
 
 def make_plot(title, xname, yname):
     plot = Plot(
-        x_range=xdr, y_range=ydr, data_sources=[lines_source, circles_source],
-        title=title, width=400, height=400, border_fill='white', background_fill='#e9e0db')
-    xaxis = LinearAxis(plot=plot, dimension=0, location="bottom", axis_line_color=None)
-    yaxis = LinearAxis(plot=plot, dimension=1, location="left", axis_line_color=None)
-    xgrid = Grid(plot=plot, dimension=0)
-    ygrid = Grid(plot=plot, dimension=1)
-    line_renderer = Glyph(
-        data_source = lines_source,
-        xdata_range = xdr,
-        ydata_range = ydr,
-        glyph = Line(x='x', y='y', line_color="#666699", line_width=2),
+        x_range=xdr, y_range=ydr,
+        title=title, plot_width=400, plot_height=400,
+        border_fill='white', background_fill='#e9e0db'
     )
-    plot.renderers.append(line_renderer)
-    circle_renderer = Glyph(
-        data_source = circles_source,
-        xdata_range = xdr,
-        ydata_range = ydr,
-        glyph = Circle(x=xname, y=yname, radius=6, fill_color="#cc6633",
-                       line_color="#cc6633", fill_alpha=0.5),
-)
-    plot.renderers.append(circle_renderer)
-    return plot, (line_renderer, circle_renderer, xaxis, yaxis, xgrid, ygrid)
+
+    xaxis = LinearAxis(axis_line_color=None)
+    plot.add_layout(xaxis, 'below')
+
+    yaxis = LinearAxis(axis_line_color=None)
+    plot.add_layout(yaxis, 'left')
+
+    plot.add_layout(Grid(dimension=0, ticker=xaxis.ticker))
+    plot.add_layout(Grid(dimension=1, ticker=yaxis.ticker))
+
+    line = Line(x='x', y='y', line_color="#666699", line_width=2)
+    plot.add_glyph(lines_source, line)
+
+    circle = Circle(
+        x=xname, y=yname, size=12,
+        fill_color="#cc6633", line_color="#cc6633", fill_alpha=0.5
+    )
+    plot.add_glyph(circles_source, circle)
+
+    return plot
 
 #where will this comment show up
-I,   objsI   = make_plot('I', 'xi', 'yi')
-II,  objsII  = make_plot('II', 'xii', 'yii')
-III, objsIII = make_plot('III', 'xiii', 'yiii')
-IV,  objsIV  = make_plot('IV', 'xiv', 'yiv')
+I   = make_plot('I',   'xi',   'yi')
+II  = make_plot('II',  'xii',  'yii')
+III = make_plot('III', 'xiii', 'yiii')
+IV  = make_plot('IV',  'xiv',  'yiv')
 
-grid = GridPlot(children=[[I, II], [III, IV]], width="800px")
+grid = GridPlot(children=[[I, II], [III, IV]], plot_width=800)
 
-sess = session.HTMLFileSession("anscombe.html")
-sess.add(lines_source, circles_source, xdr, ydr)
-sess.add(*(objsI + objsII + objsIII + objsIV))
-sess.add(grid, I, II, III, IV)
-sess.plotcontext.children.append(grid)
-sess.save(js="relative", css="relative", rootdir=os.path.abspath("."))
+doc = Document()
+doc.add(grid)
 
 if __name__ == "__main__":
-    try:
-        import webbrowser
-        webbrowser.open("file://" + os.path.abspath("anscombe.html"))
-    except:
-        pass
+    filename = "anscombe.html"
+    with open(filename, "w") as f:
+        f.write(file_html(doc, INLINE, "Anscombe's Quartet"))
+    print("Wrote %s" % filename)
+    view(filename)

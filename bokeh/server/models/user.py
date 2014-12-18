@@ -1,40 +1,43 @@
-from .. import models
-from ...exceptions import DataIntegrityException
-from docs import Doc
+
 import uuid
+
+from six import string_types
 from werkzeug import generate_password_hash, check_password_hash
+
+from bokeh.exceptions import DataIntegrityException
+
+from .docs import Doc
+from .. import models
 
 def apiuser_from_request(app, request):
     apikey = request.headers.get('BOKEHUSER-API-KEY')
     if not apikey:
         return None
     username = request.headers['BOKEHUSER']
-    bokehuser = User.load(app.model_redis, username)
+    bokehuser = User.load(app.servermodel_storage, username)
     if bokehuser.apikey == apikey:
         return bokehuser
     else:
         return None
 
 def new_user(client, username, password, apikey=None, docs=None):
+    """there is probably a race condition here if the same user
+    is registered at the same time since redis doesn't have transactions
+    """
     if apikey is None:
         apikey = str(uuid.uuid4())
-    key = User.modelkey(username)
-    with client.pipeline() as pipe:
-        pipe.watch(key)
-        pipe.multi()
-        if client.exists(key):
-            raise models.UnauthorizedException
-        passhash = generate_password_hash(password, method='sha1')
-        user = User(username, passhash, apikey, docs=docs)
-        user.save(pipe)
-        pipe.execute()
-        return user
+    passhash = generate_password_hash(password, method='sha1')
+    user = User(username, passhash, apikey, docs=docs)
+    user.create(client)
+    return user
 
-def auth_user(client, username, password):
+def auth_user(client, username, password=None, apikey=None):
     user = User.load(client, username)
     if user is None:
-        raise models.UnauthorizedException        
-    if check_password_hash(user.passhash, password):
+        raise models.UnauthorizedException
+    if password and check_password_hash(user.passhash, password):
+        return user
+    elif apikey and user.apikey == apikey:
         return user
     else:
         raise models.UnauthorizedException
@@ -50,7 +53,7 @@ class User(models.ServerModel):
         if docs is None:
             docs = []
         self.docs = docs
-        
+
     @classmethod
     def load(cls, client, objid):
         attrs = cls.load_json(client, objid)
@@ -63,7 +66,7 @@ class User(models.ServerModel):
         docs = attrs.get('docs')
         newdocs = []
         for doc in docs:
-            if isinstance(doc, basestring):
+            if isinstance(doc, string_types):
                 doc = Doc.load(client, doc)
                 newdocs.append({'title' : doc.title,
                                 'docid' : doc.docid})
@@ -75,31 +78,31 @@ class User(models.ServerModel):
         if changed:
             obj.save(client)
         return obj
-    
+
     def add_doc(self, docid, title):
         matching = [x for x in self.docs if x.get('title') == title]
         if len(matching) > 0:
-            raise DataIntegrityException, 'title already exists'
+            raise DataIntegrityException('title already exists')
         self.docs.append({'docid' : docid, 'title' : title})
-        
+
     def remove_doc(self, docid):
         matching = [x for x in self.docs if x.get('docid') == docid]
         if len(matching) == 0:
-            raise DataIntegrityException, 'no document found'
+            raise DataIntegrityException('no document found')
         self.docs = [x for x in self.docs if x.get('docid') != docid]
-        
-        
+
+
     def to_public_json(self):
         return {'username' : self.username,
                 'docs' : self.docs}
-        
+
     def to_json(self):
         return {'username' : self.username,
                 'passhash' : self.passhash,
                 'apikey' : self.apikey,
                 'docs' : self.docs,
                 }
-    
+
     @staticmethod
     def from_json(obj):
         return User(obj['username'],
@@ -107,4 +110,3 @@ class User(models.ServerModel):
                     obj['apikey'],
                     obj['docs'],
                     )
-        

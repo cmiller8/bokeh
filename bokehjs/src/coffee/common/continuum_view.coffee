@@ -1,5 +1,3 @@
-
-
 define [
   "underscore",
   "backbone",
@@ -19,12 +17,10 @@ define [
       super(events)
 
     remove: ->
-      #handles lifecycle of events bound by safebind
-
       if _.has(this, 'eventers')
         for own target, val of @eventers
           val.off(null, null, this)
-      @trigger('remove')
+      @trigger('remove', this)
       super()
 
     mget: ()->
@@ -33,17 +29,7 @@ define [
 
     mset: ()->
       # convenience function, calls set on the associated model
-
       return @model.set.apply(@model, arguments)
-
-    mget_obj: (fld) ->
-      # convenience function, calls get_obj on the associated model
-
-      return @model.get_obj(fld)
 
     render_end: () ->
       "pass"
-
-  return {
-    "View": ContinuumView
-  }

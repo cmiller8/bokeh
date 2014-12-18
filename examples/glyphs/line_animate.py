@@ -1,76 +1,58 @@
+from __future__ import print_function
 
-from numpy import pi, arange, sin, cos
-import numpy as np
-import os.path
 import time
-from bokeh.objects import (Plot, DataRange1d, LinearAxis, 
-        ObjectArrayDataSource, ColumnDataSource, Glyph,
-        PanTool, ZoomTool)
-from bokeh.glyphs import Line
-from bokeh import session
 
-x = np.linspace(-2*pi, 2*pi, 1000)
-x_static = np.linspace(-2*pi, 2*pi, 1000)
+from numpy import pi, sin, cos, linspace
+
+from bokeh.browserlib import view
+from bokeh.document import Document
+from bokeh.models.glyphs import Line
+from bokeh.models import (
+    Plot, DataRange1d, LinearAxis,
+    ColumnDataSource, PanTool, WheelZoomTool
+)
+from bokeh.session import Session
+
+document = Document()
+session = Session()
+session.use_doc('line_animate')
+session.load_document(document)
+
+x = linspace(-2*pi, 2*pi, 1000)
+x_static = linspace(-2*pi, 2*pi, 1000)
 y = sin(x)
 z = cos(x)
-widths = np.ones_like(x) * 0.02
-heights = np.ones_like(x) * 0.2
 
-source = ColumnDataSource(
-    data=dict(x=x, y=y, z=z, x_static=x_static,
-              widths=widths, heights=heights))
+source = ColumnDataSource(data=dict(x=x, y=y, z=z, x_static=x_static))
 
 xdr = DataRange1d(sources=[source.columns("x")])
 xdr_static = DataRange1d(sources=[source.columns("x_static")])
 ydr = DataRange1d(sources=[source.columns("y")])
 
+plot = Plot(x_range=xdr_static, y_range=ydr, min_border=50)
+
 line_glyph = Line(x="x", y="y", line_color="blue")
+plot.add_glyph(source, line_glyph)
+
 line_glyph2 = Line(x="x", y="z", line_color="red")
-renderer = Glyph(
-        data_source = source,
-        xdata_range = xdr,
-        ydata_range = ydr,
-        glyph = line_glyph
-        )
-renderer2 = Glyph(
-        data_source = source,
-        xdata_range = xdr_static,
-        ydata_range = ydr,
-        glyph = line_glyph2
-        )
+plot.add_glyph(source, line_glyph2)
 
-plot = Plot(x_range=xdr_static, y_range=ydr, data_sources=[source], 
-        border=50)
-xaxis = LinearAxis(plot=plot, dimension=0, location="bottom")
-yaxis = LinearAxis(plot=plot, dimension=1, location="left")
+plot.add_layout(LinearAxis(), 'below')
+plot.add_layout(LinearAxis(), 'left')
 
-pantool = PanTool(dataranges = [xdr, ydr], dimensions=["width","height"])
-zoomtool = ZoomTool(dataranges=[xdr,ydr], dimensions=("width","height"))
+plot.add_tools(PanTool(), WheelZoomTool())
 
-plot.renderers.append(renderer)
-plot.renderers.append(renderer2)
-plot.tools = [pantool, zoomtool]
+document.add(plot)
+session.store_document(document)
 
-sess = session.PlotServerSession(
-    username="defaultuser",
-    serverloc="http://localhost:5006", userapikey="nokey")
-sess.use_doc("line_animate")
-sess.add(plot, renderer, renderer2, xaxis, yaxis, 
-         source, xdr, ydr, xdr_static, pantool, zoomtool)
-sess.plotcontext.children.append(plot)
-sess.plotcontext._dirty = True
-# not so nice.. but set the model doens't know
-# that we appended to children
-sess.store_all()
+link = session.object_link(document.context)
+print("please visit %s to see plots" % link)
+view(link)
 
-print "Stored to document line_animate at http://localhost:5006/bokeh"
+print("\nanimating... press ctrl-C to stop")
 
 while True:
-    for i in  np.linspace(-2*pi, 2*pi, 50):
-        source._data['x'] = x +i
-        source._dirty = True
-        sess.store_all()
+    for i in linspace(-2*pi, 2*pi, 50):
+        source.data['x'] = x + i
+        session.store_objects(source)
         time.sleep(0.05)
-
-
-

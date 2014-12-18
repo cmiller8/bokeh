@@ -1,6 +1,6 @@
+from __future__ import division
 
 import numpy as np
-from scipy.integrate import odeint
 
 from bokeh.plotting import *
 
@@ -158,7 +158,7 @@ def streamlines(x, y, u, v, density=1):
 
     ## Now we build up the trajectory set. I've found it best to look
     ## for blank==0 along the edges first, and work inwards.
-    for indent in range((max(NBX,NBY))/2):
+    for indent in range((max(NBX,NBY))//2):
         for xi in range(max(NBX,NBY)-2*indent):
             traj(xi+indent, indent)
             traj(xi+indent, NBY-1-indent)
@@ -194,7 +194,10 @@ colors = cm[ix]
 
 output_file("vector.html", title="vector.py example")
 
-segment(x0, y0, x1, y1, line_color=colors, line_width=2)
-multi_line(xs, ys, line_color="#ee6666", line_width=2, line_alpha=0.8, name="vector example")
+p1 = figure()
+p1.segment(x0, y0, x1, y1, color=colors, line_width=2)
 
-show()  # open a browser
+p2 = figure()
+p2.multi_line(xs, ys, color="#ee6666", line_width=2, line_alpha=0.8)
+
+show(VBox(p1,p2))  # open a browser

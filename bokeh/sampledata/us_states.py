@@ -10,6 +10,7 @@ associated value:
 
 '''
 import csv
+import codecs
 import gzip
 import xml.etree.cElementTree as et
 from os.path import dirname, join
@@ -17,9 +18,10 @@ from os.path import dirname, join
 nan = float('NaN')
 
 data = {}
-with gzip.open(join(dirname(__file__), 'US Regions State Boundaries.csv.gz')) as f:
-    f.next()
-    reader = csv.reader(f, delimiter=',', quotechar='"')
+with gzip.open(join(dirname(__file__), 'US_Regions_State_Boundaries.csv.gz')) as f:
+    decoded = codecs.iterdecode(f, "utf-8")
+    next(decoded)
+    reader = csv.reader(decoded, delimiter=',', quotechar='"')
     for row in reader:
         region, name, code, geometry, dummy = row
         xml = et.fromstring(geometry)
@@ -30,7 +32,8 @@ with gzip.open(join(dirname(__file__), 'US Regions State Boundaries.csv.gz')) as
                 lats.append(nan)
                 lons.append(nan)
             coords = (c.split(',')[:2] for c in poly.text.split())
-            lat, lon = zip(*[(float(lat), float(lon)) for lon, lat in coords])
+            lat, lon = list(zip(*[(float(lat), float(lon)) for lon, lat in
+                coords]))
             lats.extend(lat)
             lons.extend(lon)
         data[code] = {

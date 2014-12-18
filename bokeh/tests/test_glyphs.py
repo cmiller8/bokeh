@@ -1,188 +1,384 @@
 import unittest
 
-from bokeh.properties import HasProps
-from bokeh.glyphs import DataSpec, ColorSpec
+from bokeh.models.glyphs import (
+    AnnularWedge, Annulus, Arc,
+    Bezier,
+    Circle,
+    Gear,
+    Image, ImageRGBA, ImageURL,
+    Line,
+    MultiLine,
+    Oval,
+    Patch, Patches,
+    Quad, Quadratic, Ray,
+    Rect,
+    Segment,
+    Text,
+    Wedge)
 
-class TestDataSpec(unittest.TestCase):
+from bokeh.models.glyphs import (
+    Asterisk,
+    CircleCross, CircleX, Cross,
+    Diamond, DiamondCross,
+    InvertedTriangle,
+    Square, SquareCross, SquareX,
+    Triangle,
+    X)
 
-    def test_field(self):
-        class Foo(HasProps):
-            x = DataSpec("xfield")
-        f = Foo()
-        self.assertEqual(f.x, "xfield")
-        self.assertDictEqual(Foo.__dict__["x"].to_dict(f), {"field": "xfield", "units": "data"})
-        f.x = "my_x"
-        self.assertEqual(f.x, "my_x")
-        self.assertDictEqual(Foo.__dict__["x"].to_dict(f), {"field": "my_x", "units": "data"})
+from bokeh.enums import (
+    LineJoin, LineDash, LineCap,
+    FontStyle,
+    TextAlign, TextBaseline,
+    Direction,
+    Units, AngleUnits, DatetimeUnits,
+    Dimension,
+    Anchor, Location, Orientation,
+    DashPattern,
+    ButtonType, MapType,
+    NamedColor as Color, NamedIcon)
 
-    def test_value(self):
-        class Foo(HasProps):
-            x = DataSpec("xfield")
-        f = Foo()
-        self.assertEqual(f.x, "xfield")
-        f.x = 12
-        self.assertEqual(f.x, 12)
-        self.assertDictEqual(Foo.__dict__["x"].to_dict(f), {"value": 12, "units": "data"})
-        f.x = 15
-        self.assertEqual(f.x, 15)
-        self.assertDictEqual(Foo.__dict__["x"].to_dict(f), {"value": 15, "units": "data"})
-        f.x = dict(value=23, units="screen")
-        self.assertDictEqual(Foo.__dict__["x"].to_dict(f), {"value": 23, "units": "screen"})
-        # Setting defaults when there is a fixed value should do nothing, so verify this.
-        # Also, setting a dict clobbers all fields that are not explicitly set, so "units"
-        # gets reset back to the default value on the DataSpec, which is "data".
-        f.x = dict(value=32, default=18)
-        self.assertDictEqual(Foo.__dict__["x"].to_dict(f), {"value": 32, "units": "data"})
+FILL = ["fill_color", "fill_alpha"]
+LINE = ["line_color", "line_width", "line_alpha", "line_join", "line_cap", "line_dash", "line_dash_offset"]
+TEXT = ["text_font", "text_font_size", "text_font_style", "text_color", "text_alpha", "text_align", "text_baseline"]
 
-    def test_default(self):
-        class Foo(HasProps):
-            y = DataSpec("yfield", default=12)
-        f = Foo()
-        self.assertEqual(f.y, {"field": "yfield", "default": 12})
-        self.assertDictEqual(Foo.__dict__["y"].to_dict(f), {"field": "yfield", "default": 12, "units": "data"})
-        f.y = "y1"
-        self.assertEqual(f.y, "y1")
-        f.y = ("y2", 27)
-        self.assertDictEqual(f.y, {"field": "y2", "default": 27, "units": "data"})
-        self.assertDictEqual(Foo.__dict__["y"].to_dict(f), {"field": "y2", "default": 27, "units": "data"})
-        # Once we set a concrete value, the default is ignored, because it is unused
-        f.y = 32
-        self.assertEqual(f.y, 32)
-        self.assertDictEqual(Foo.__dict__["y"].to_dict(f), {"value": 32, "units": "data"})
+PROPS = ["session", "name", "tags"]
+GLYPH = ["visible", "margin", "halign", "valign",
+         "size_units", "radius_units", "length_units", "angle_units", "start_angle_units", "end_angle_units"]
+MARKER = ["x", "y", "size"]
 
-    def test_multiple_instances(self):
-        class Foo(HasProps):
-            x = DataSpec("xfield", default=12)
+def check_props(glyph, *props):
+    expected = set(sum((PROPS, GLYPH) + props, []))
+    found = set(glyph.properties())
+    missing = expected.difference(found)
+    extra = found.difference(expected)
+    assert len(missing) == 0, "Properties missing: {0}".format(", ".join(sorted(missing)))
+    assert len(extra) == 0, "Extra properties: {0}".format(", ".join(sorted(extra)))
 
-        a = Foo()
-        b = Foo()
-        a.x = 13
-        b.x = 14
-        self.assertEqual(a.x, 13)
-        self.assertEqual(b.x, 14)
-        self.assertDictEqual(Foo.__dict__["x"].to_dict(a), {"value": 13, "units": "data"})
-        self.assertDictEqual(Foo.__dict__["x"].to_dict(b), {"value": 14, "units": "data"})
-        a.x = ("x2", 21)
-        self.assertDictEqual(Foo.__dict__["x"].to_dict(a), {"field": "x2", "default": 21, "units": "data"})
-        self.assertDictEqual(Foo.__dict__["x"].to_dict(b), {"value": 14, "units": "data"})
-        b.x = {"field": "x3", "units": "screen", "default": 25}
-        self.assertDictEqual(Foo.__dict__["x"].to_dict(a), {"field": "x2", "default": 21, "units": "data"})
-        self.assertDictEqual(Foo.__dict__["x"].to_dict(b), {"field": "x3", "units": "screen", "default": 25})
+def check_fill(glyph):
+    assert glyph.fill_color == Color.gray
+    assert glyph.fill_alpha == 1.0
 
+def check_line(glyph):
+    assert glyph.line_color == Color.black
+    assert glyph.line_width == "line_width"
+    assert glyph.line_alpha == 1.0
+    assert glyph.line_join == LineJoin.miter
+    assert glyph.line_cap == LineCap.butt
+    assert glyph.line_dash == []
+    assert glyph.line_dash_offset == 0
 
-class TestColorSpec(unittest.TestCase):
+def check_text(glyph):
+    assert glyph.text_font == "Helvetica"
+    assert glyph.text_font_size == "12pt"
+    assert glyph.text_font_style == FontStyle.normal
+    assert glyph.text_color == "#444444"
+    assert glyph.text_alpha == 1.0
+    assert glyph.text_align == TextAlign.left
+    assert glyph.text_baseline == TextBaseline.bottom
 
-    def test_field(self):
-        class Foo(HasProps):
-            col = ColorSpec("colorfield")
-        desc = Foo.__dict__["col"]
-        f = Foo()
-        self.assertEqual(f.col, "colorfield")
-        self.assertDictEqual(desc.to_dict(f), {"field": "colorfield"})
-        f.col = "myfield"
-        self.assertEqual(f.col, "myfield")
-        self.assertDictEqual(desc.to_dict(f), {"field": "myfield"})
+def check_marker(marker):
+    assert marker.x == "x"
+    assert marker.y == "y"
+    assert marker.size == 4
 
-    def test_field_default(self):
-        class Foo(HasProps):
-            col = ColorSpec("colorfield", default="red")
-        desc = Foo.__dict__["col"]
-        f = Foo()
-        self.assertDictEqual(f.col, {"field": "colorfield", "default": "red"})
-        self.assertDictEqual(desc.to_dict(f), {"field": "colorfield", "default": "red"})
-        f.col = "myfield"
-        self.assertDictEqual(f.col, {"field": "myfield", "default": "red"})
-        self.assertDictEqual(desc.to_dict(f), {"field": "myfield", "default": "red"})
+def test_AnnularWedge():
+    glyph = AnnularWedge()
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    assert glyph.inner_radius == None
+    assert glyph.outer_radius == None
+    assert glyph.start_angle == "start_angle"
+    assert glyph.end_angle == "end_angle"
+    assert glyph.direction == "clock"
+    yield check_fill, glyph
+    yield check_line, glyph
+    yield check_props, glyph, ["x", "y", "inner_radius", "outer_radius", "start_angle", "end_angle", "direction"], FILL, LINE
 
-    def test_default_tuple(self):
-        class Foo(HasProps):
-            col = ColorSpec("colorfield", default=(128,255,124))
-        desc = Foo.__dict__["col"]
-        f = Foo()
-        self.assertDictEqual(f.col, {"field": "colorfield", "default": (128, 255, 124)})
-        self.assertDictEqual(desc.to_dict(f), {"field": "colorfield", "default": "rgb(128, 255, 124)"})
+def test_Annulus():
+    glyph = Annulus()
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    assert glyph.inner_radius == None
+    assert glyph.outer_radius == None
+    yield check_fill, glyph
+    yield check_line, glyph
+    yield check_props, glyph, ["x", "y", "inner_radius", "outer_radius"], FILL, LINE
 
-    def test_fixed_value(self):
-        class Foo(HasProps):
-            col = ColorSpec("gray")
-        desc = Foo.__dict__["col"]
-        f = Foo()
-        self.assertEqual(f.col, "gray")
-        self.assertDictEqual(desc.to_dict(f), {"value": "gray"})
+def test_Arc():
+    glyph = Arc()
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    assert glyph.radius == None
+    assert glyph.start_angle == "start_angle"
+    assert glyph.end_angle == "end_angle"
+    assert glyph.direction == "clock"
+    yield check_line, glyph
+    yield check_props, glyph, ["x", "y", "radius", "start_angle", "end_angle", "direction"], LINE
 
-    def test_named_value(self):
-        class Foo(HasProps):
-            col = ColorSpec("colorfield")
-        desc = Foo.__dict__["col"]
-        f = Foo()
+def test_Bezier():
+    glyph = Bezier()
+    assert glyph.x0 == "x0"
+    assert glyph.y0 == "y0"
+    assert glyph.x1 == "x1"
+    assert glyph.y1 == "y1"
+    assert glyph.cx0 == "cx0"
+    assert glyph.cy0 == "cy0"
+    assert glyph.cx1 == "cx1"
+    assert glyph.cy1 == "cy1"
+    yield check_line, glyph
+    yield check_props, glyph, ["x0", "y0", "x1", "y1", "cx0", "cy0", "cx1", "cy1"], LINE
 
-        f.col = "red"
-        self.assertEqual(f.col, "red")
-        self.assertDictEqual(desc.to_dict(f), {"value": "red"})
-        f.col = "forestgreen"
-        self.assertEqual(f.col, "forestgreen")
-        self.assertDictEqual(desc.to_dict(f), {"value": "forestgreen"})
+def test_Gear():
+    glyph = Gear()
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    assert glyph.angle == 0
+    assert glyph.module == "module"
+    assert glyph.teeth == "teeth"
+    assert glyph.pressure_angle == 20
+    assert glyph.shaft_size == 0.3
+    assert glyph.internal == False
+    yield check_fill, glyph
+    yield check_line, glyph
+    yield check_props, glyph, ["x", "y", "angle", "module", "teeth", "pressure_angle", "shaft_size", "internal"], FILL, LINE
 
-    def test_named_value_set_none(self):
-        class Foo(HasProps):
-            col = ColorSpec("colorfield")
-        desc = Foo.__dict__["col"]
-        f = Foo()
-        f.col = None
-        self.assertDictEqual(desc.to_dict(f), {"value": None})
+def test_Image():
+    glyph = Image()
+    assert glyph.image == "image"
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    assert glyph.dw == "dw"
+    assert glyph.dh == "dh"
+    assert glyph.dilate == False
+    yield check_props, glyph, ["image", "x", "y", "dw", "dh", "dilate", "color_mapper"]
 
-    def test_named_color_overriding_default(self):
-        class Foo(HasProps):
-            col = ColorSpec("colorfield", default="blue")
-        desc = Foo.__dict__["col"]
-        f = Foo()
-        f.col = "forestgreen"
-        self.assertEqual(f.col, "forestgreen")
-        self.assertDictEqual(desc.to_dict(f), {"value": "forestgreen"})
-        f.col = "myfield"
-        self.assertDictEqual(f.col, {"field": "myfield", "default": "blue"})
-        self.assertDictEqual(desc.to_dict(f), {"field": "myfield", "default": "blue"})
+def test_ImageRGBA():
+    glyph = ImageRGBA()
+    assert glyph.image == "image"
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    assert glyph.dw == "dw"
+    assert glyph.dh == "dh"
+    assert glyph.rows == "rows"
+    assert glyph.cols == "cols"
+    assert glyph.dilate == False
+    assert glyph.anchor == Anchor.top_left
+    yield check_props, glyph, ["image", "x", "y", "dw", "dh", "rows", "cols", "dilate", "anchor"]
 
-    def test_hex_value(self):
-        class Foo(HasProps):
-            col = ColorSpec("colorfield")
-        desc = Foo.__dict__["col"]
-        f = Foo()
-        f.col = "#FF004A"
-        self.assertEqual(f.col, "#FF004A")
-        self.assertDictEqual(desc.to_dict(f), {"value": "#FF004A"})
-        f.col = "myfield"
-        self.assertEqual(f.col, "myfield")
-        self.assertDictEqual(desc.to_dict(f), {"field": "myfield"})
+def test_ImageURL():
+    glyph = ImageURL()
+    assert glyph.url == "url"
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    assert glyph.w == "w"
+    assert glyph.h == "h"
+    assert glyph.angle == 0
+    assert glyph.dilate == False
+    assert glyph.anchor == Anchor.top_left
+    yield check_props, glyph, ["url", "x", "y", "w", "h", "angle", "dilate", "anchor"]
 
-    def test_tuple_value(self):
-        class Foo(HasProps):
-            col = ColorSpec("colorfield")
-        desc = Foo.__dict__["col"]
-        f = Foo()
-        f.col = (128, 200, 255)
-        self.assertEqual(f.col, (128, 200, 255))
-        self.assertDictEqual(desc.to_dict(f), {"value": "rgb(128, 200, 255)"})
-        f.col = "myfield"
-        self.assertEqual(f.col, "myfield")
-        self.assertDictEqual(desc.to_dict(f), {"field": "myfield"})
-        f.col = (100, 150, 200, 0.5)
-        self.assertEqual(f.col, (100, 150, 200, 0.5))
-        self.assertDictEqual(desc.to_dict(f), {"value": "rgba(100, 150, 200, 0.5)"})
+def test_Line():
+    glyph = Line()
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    yield check_line, glyph
+    yield check_props, glyph, ["x", "y"], LINE
 
-    def test_set_dict(self):
-        class Foo(HasProps):
-            col = ColorSpec("colorfield")
-        desc = Foo.__dict__["col"]
-        f = Foo()
-        f.col = {"field": "myfield", "default": "#88FF00"}
-        self.assertDictEqual(f.col, {"field": "myfield", "default": "#88FF00"})
+def test_MultiLine():
+    glyph = MultiLine()
+    assert glyph.xs == "xs"
+    assert glyph.ys == "ys"
+    yield check_line, glyph
+    yield check_props, glyph, ["xs", "ys"], LINE
 
-        f.col = "field2"
-        self.assertEqual(f.col, "field2")
-        self.assertDictEqual(desc.to_dict(f), {"field": "field2"})
+def test_Oval():
+    glyph = Oval()
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    assert glyph.width == "width"
+    assert glyph.height == "height"
+    assert glyph.angle == "angle"
+    yield check_fill, glyph
+    yield check_line, glyph
+    yield check_props, glyph, ["x", "y", "width", "height", "angle"], FILL, LINE
 
+def test_Patch():
+    glyph = Patch()
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    yield check_fill, glyph
+    yield check_line, glyph
+    yield check_props, glyph, ["x", "y"], FILL, LINE
 
-if __name__ == "__main__":
-    unittest.main()
+def test_Patches():
+    glyph = Patches()
+    assert glyph.xs == "xs"
+    assert glyph.ys == "ys"
+    yield check_fill, glyph
+    yield check_line, glyph
+    yield check_props, glyph, ["xs", "ys"], FILL, LINE
 
+def test_Quad():
+    glyph = Quad()
+    assert glyph.left == "left"
+    assert glyph.right == "right"
+    assert glyph.bottom == "bottom"
+    assert glyph.top == "top"
+    yield check_fill, glyph
+    yield check_line, glyph
+    yield check_props, glyph, ["left", "right", "bottom", "top"], FILL, LINE
+
+def test_Quadratic():
+    glyph = Quadratic()
+    assert glyph.x0 == "x0"
+    assert glyph.y0 == "y0"
+    assert glyph.x1 == "x1"
+    assert glyph.y1 == "y1"
+    assert glyph.cx == "cx"
+    assert glyph.cy == "cy"
+    yield check_line, glyph
+    yield check_props, glyph, ["x0", "y0", "x1", "y1", "cx", "cy"], LINE
+
+def test_Ray():
+    glyph = Ray()
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    assert glyph.angle == "angle"
+    assert glyph.length == None
+    yield check_line, glyph
+    yield check_props, glyph, ["x", "y", "angle", "length"], LINE
+
+def test_Rect():
+    glyph = Rect()
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    assert glyph.width == "width"
+    assert glyph.height == "height"
+    assert glyph.angle == "angle"
+    assert glyph.dilate == False
+    yield check_fill, glyph
+    yield check_line, glyph
+    yield check_props, glyph, ["x", "y", "width", "height", "angle", "dilate"], FILL, LINE
+
+def test_Segment():
+    glyph = Segment()
+    assert glyph.x0 == "x0"
+    assert glyph.y0 == "y0"
+    assert glyph.x1 == "x1"
+    assert glyph.y1 == "y1"
+    yield check_line, glyph
+    yield check_props, glyph, ["x0", "y0", "x1", "y1"], LINE
+
+def test_Text():
+    glyph = Text()
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    assert glyph.text == "text"
+    assert glyph.angle == 0
+    yield check_text, glyph
+    yield check_props, glyph, ["x", "y", "text", "angle", "x_offset", "y_offset"], TEXT
+
+def test_Wedge():
+    glyph = Wedge()
+    assert glyph.x == "x"
+    assert glyph.y == "y"
+    assert glyph.radius == None
+    assert glyph.start_angle == "start_angle"
+    assert glyph.end_angle == "end_angle"
+    assert glyph.direction == "clock"
+    yield check_fill, glyph
+    yield check_line, glyph
+    yield check_props, glyph, ["x", "y", "radius", "start_angle", "end_angle", "direction"], FILL, LINE
+
+def test_Asterisk():
+    marker = Asterisk()
+    yield check_marker, marker
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, MARKER, FILL, LINE
+
+def test_Circle():
+    marker = Circle()
+    yield check_marker, marker
+    assert marker.radius == None
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, ["radius"], MARKER, FILL, LINE
+
+def test_CircleCross():
+    marker = CircleCross()
+    yield check_marker, marker
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, MARKER, FILL, LINE
+
+def test_CircleX():
+    marker = CircleX()
+    yield check_marker, marker
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, MARKER, FILL, LINE
+
+def test_Cross():
+    marker = Cross()
+    yield check_marker, marker
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, MARKER, FILL, LINE
+
+def test_Diamond():
+    marker = Diamond()
+    yield check_marker, marker
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, MARKER, FILL, LINE
+
+def test_DiamondCross():
+    marker = DiamondCross()
+    yield check_marker, marker
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, MARKER, FILL, LINE
+
+def test_InvertedTriangle():
+    marker = InvertedTriangle()
+    yield check_marker, marker
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, MARKER, FILL, LINE
+
+def test_Square():
+    marker = Square()
+    assert marker.angle == "angle"
+    yield check_marker, marker
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, ["angle"], MARKER, FILL, LINE
+
+def test_SquareCross():
+    marker = SquareCross()
+    yield check_marker, marker
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, MARKER, FILL, LINE
+
+def test_SquareX():
+    marker = SquareX()
+    yield check_marker, marker
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, MARKER, FILL, LINE
+
+def test_Triangle():
+    marker = Triangle()
+    yield check_marker, marker
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, MARKER, FILL, LINE
+
+def test_X():
+    marker = X()
+    yield check_marker, marker
+    yield check_fill, marker
+    yield check_line, marker
+    yield check_props, marker, MARKER, FILL, LINE

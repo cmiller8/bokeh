@@ -1,6 +1,9 @@
+# The plot server must be running
+# Go to http://localhost:5006/bokeh to view this plot
+
+from __future__ import division
 
 import numpy as np
-from scipy.integrate import odeint
 
 from bokeh.plotting import *
 
@@ -158,7 +161,7 @@ def streamlines(x, y, u, v, density=1):
 
     ## Now we build up the trajectory set. I've found it best to look
     ## for blank==0 along the edges first, and work inwards.
-    for indent in range((max(NBX,NBY))/2):
+    for indent in range((max(NBX,NBY))//2):
         for xi in range(max(NBX,NBY)-2*indent):
             traj(xi+indent, indent)
             traj(xi+indent, NBY-1-indent)
@@ -169,7 +172,6 @@ def streamlines(x, y, u, v, density=1):
     ys = [np.array(t[1])*DY+YOFF for t in trajectories]
 
     return xs, ys
-
 
 xx = np.linspace(-3, 3, 100)
 yy = np.linspace(-3, 3, 100)
@@ -193,11 +195,12 @@ cm = np.array(["#C7E9B4", "#7FCDBB", "#41B6C4", "#1D91C0", "#225EA8", "#0C2C84"]
 ix = ((length-length.min())/(length.max()-length.min())*5).astype('int')
 colors = cm[ix]
 
-output_server("vector.py example")
+output_server("vector")
 
-segment(x0, y0, x1, y1, line_color=colors, line_width=2,
-    tools="pan,zoom,resize", name="vector example")
+p1 = figure()
+p1.segment(x0, y0, x1, y1, color=colors, line_width=2)
 
-multi_line(xs, ys, line_color="#ee6666", line_width=2, line_alpha=0.8)
+p2 = figure()
+p2.multi_line(xs, ys, color="#ee6666", line_width=2, line_alpha=0.8)
 
-show()  # open a browser
+show(VBox(p1,p2))  # open a browser

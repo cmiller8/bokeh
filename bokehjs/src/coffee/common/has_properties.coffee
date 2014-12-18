@@ -1,11 +1,22 @@
-
 define [
-  "underscore",
-  "backbone",
-  "require",
+  "underscore"
+  "backbone"
+  "require"
   "./base"
-  "./safebind",
-], (_, Backbone, require, base, safebind) ->
+  "./logging"
+], (_, Backbone, require, base, Logging) ->
+
+  logger = Logging.logger
+
+  _is_ref = (arg) ->
+    if _.isObject(arg)
+      keys = _.keys(arg).sort()
+      if keys.length==2
+        return keys[0]=='id' and keys[1]=='type'
+      if keys.length==3
+        return keys[0]=='id' and keys[1]=='subtype' and keys[2]=='type'
+    return false
+
   class HasProperties extends Backbone.Model
     # Our property system
     # we support python style computed properties, with getters
@@ -13,40 +24,87 @@ define [
     # and notifications of property. We also support weak references
     # to other models using the reference system described above.
 
+    toString: () -> "#{@type}(#{@id})"
+
     destroy: (options)->
-      #calls super, also unbinds any events bound by safebind
+      # calls super, also unbinds any events bound by listenTo
       super(options)
-      if _.has(this, 'eventers')
-        for own target, val of @eventers
-          val.off(null, null, this)
+      @stopListening()
 
     isNew: () ->
       return false
 
-    initialize: (attrs, options) ->
-      # auto generates ids if we need to, calls deferred initialize if we have
-      # not done so already.   sets up datastructures for computed properties
-      if not attrs
-         attrs = {}
+    attrs_and_props : () ->
+      data = _.clone(@attributes)
+      for prop_name in _.keys(@properties)
+        data[prop_name] = @get(prop_name)
+      return data
+
+    constructor : (attributes, options) ->
+      ## straight from backbone.js
+      attrs = attributes || {}
       if not options
         options = {}
-      super(attrs, options)
+      this.cid = _.uniqueId('c')
+      this.attributes = {}
+      if options.collection
+        this.collection = options.collection
+      if options.parse
+        attrs = this.parse(attrs, options) || {}
+      attrs = _.defaults({}, attrs, _.result(this, 'defaults'))
+      this.set(attrs, options)
+      this.changed = {}
+
+      ## bokeh custom constructor code
+
+      # cheap memoization, for storing the base module, requirejs doesn't seem to do it
+      @_base = false
+
+      # setting up data structures for properties
       @properties = {}
       @property_cache = {}
+
+      # auto generating ID
       if not _.has(attrs, @idAttribute)
         this.id = _.uniqueId(this.type)
         this.attributes[@idAttribute] = this.id
-      _.defer(() =>
-        if not @inited
-          @dinitialize(attrs, options))
 
-    dinitialize: (attrs, options) ->
-      # deferred initialization - this is important so we can separate object
-      # creation from object initialization.  We need this if we receive a group
-      # of objects, that need to bind events to each other.  Then we create them all
-      # first, and then call deferred intialization so they can setup dependencies
-      # on each other
-      @inited = true
+      # allowing us to defer initialization when loading many models
+      # when loading a bunch of models, we want to do initialization as a second pass
+      # because other objects that this one depends on might not be loaded yet
+
+      if not options.defer_initialization
+        this.initialize.apply(this, arguments)
+
+    forceTrigger: (changes) ->
+      # This is "trigger" part of backbone's set() method. set() is unable to work with
+      # mutable data structures, so instead of using set() we update data in-place and
+      # then call forceTrigger() which will make sure all listeners are notified of any
+      # changes, e.g.:
+      #
+      #   source.get("data")[field][index] += 1
+      #   source.forceTrigger()
+      #
+      if not _.isArray(changes)
+        changes = [changes]
+
+      options    = {}
+      changing   = @_changing
+      @_changing = true
+
+      if changes.length then @_pending = true
+      for change in changes
+        @trigger('change:' + change, this, @attributes[change], options)
+
+      if changing then return this
+      while @_pending
+        @_pending = false
+        @trigger('change', this, options)
+
+      @_pending = false
+      @_changing = false
+
+      return this
 
     set_obj: (key, value, options) ->
       if _.isObject(key) or key == null
@@ -77,10 +135,12 @@ define [
         if _.has(this, 'properties') and
            _.has(@properties, key) and
            @properties[key]['setter']
-          @properties[key]['setter'].call(this, val)
+          @properties[key]['setter'].call(this, val, key)
           toremove.push(key)
-      for key in toremove
-        delete attrs[key]
+      if not _.isEmpty(toremove)
+        attrs = _.clone(attrs)
+        for key in toremove
+          delete attrs[key]
       if not _.isEmpty(attrs)
         super(attrs, options)
 
@@ -108,8 +168,7 @@ define [
       )
       # bind depdencies to change dep callback
       for fld in fields
-        safebind(this, object, "change:" + fld,
-            prop_spec['callbacks']['changedep'])
+        @listenTo(object, "change:" + fld, prop_spec['callbacks']['changedep'])
 
     # ### method: HasProperties::register_setter
     register_setter: (prop_name, setter) ->
@@ -156,8 +215,7 @@ define [
             propchange: propchange
         @properties[prop_name] = prop_spec
         # bind propchange callback to change dep event
-        safebind(this, this, "changedep:" + prop_name,
-          prop_spec['callbacks']['propchange'])
+        @listenTo(this, "changedep:" + prop_name, prop_spec['callbacks']['propchange'])
         return prop_spec
 
     remove_property: (prop_name) ->
@@ -186,66 +244,69 @@ define [
     get_cache: (prop_name) ->
       return @property_cache[prop_name]
 
-    get: (prop_name) ->
+    get: (prop_name, resolve_refs=true) ->
       # ### method: HasProperties::get
       # overrides backbone get.  checks properties,
       # calls getter, or goes to cache
       # if necessary.  If it's not a property, then just call super
-
       if _.has(@properties, prop_name)
-        prop_spec = @properties[prop_name]
-        if prop_spec.use_cache and @has_cache(prop_name)
-          return @property_cache[prop_name]
-        else
-          getter = prop_spec.getter
-          computed = getter.apply(this)
-          if @properties[prop_name].use_cache
-            @add_cache(prop_name, computed)
-          return computed
+        return @_get_prop(prop_name)
       else
-        return super(prop_name)
+        ref_or_val = super(prop_name)
+        if not resolve_refs
+          return ref_or_val
+        return @resolve_ref(ref_or_val)
 
-    ref: ->
+    _get_prop: (prop_name) ->
+      prop_spec = @properties[prop_name]
+      if prop_spec.use_cache and @has_cache(prop_name)
+        return @property_cache[prop_name]
+      else
+        getter = prop_spec.getter
+        computed = getter.apply(this, [prop_name])
+        if @properties[prop_name].use_cache
+          @add_cache(prop_name, computed)
+        return computed
+
+    ref: () ->
       # ### method: HasProperties::ref
-      #generates a reference to this model
+      # generates a reference to this model
       'type': this.type
       'id': this.id
 
-    resolve_ref: (ref) =>
+    resolve_ref: (arg) =>
       # ### method: HasProperties::resolve_ref
-      #converts a reference into an object
-      #also works vectorized now
-      if _.isArray(ref)
-        return _.map(ref, @resolve_ref)
-      if not ref
-        console.log('ERROR, null reference')
-      #this way we can reference ourselves
-      # even though we are not in any collection yet
-      if ref['type'] == this.type and ref['id'] == this.id
-        return this
-      else
-        base = require('./base')
-        return base.Collections(ref['type']).get(ref['id'])
+      # converts references into an objects, leaving non-references alone
+      # also works "vectorized" on arrays and objects
+      if _.isUndefined(arg)
+        return arg
+      if _.isArray(arg)
+        return (@resolve_ref(x) for x in arg)
+      if _is_ref(arg)
+        # this way we can reference ourselves
+        # even though we are not in any collection yet
+        if arg['type'] == this.type and arg['id'] == this.id
+          return this
+        else
+          return @get_base().Collections(arg['type']).get(arg['id'])
+      return arg
 
-    get_obj: (ref_name) =>
-      # ### method: HasProperties::get_obj
-      #convenience function, gets the backbone attribute ref_name, which is assumed
-      #to be a reference, then resolves the reference and returns the model
-
-      ref = @get(ref_name)
-      if ref
-        return @resolve_ref(ref)
+    get_base: ()->
+      if not @_base
+        @_base = require('./base')
+      return @_base
 
     url: () ->
       # ### method HasProperties::url
-      #model where our API processes this model
+      # model where our API processes this model
+      doc = @get('doc')
+      if not doc?
+        logger.error("unset 'doc' in #{@}")
 
-      base = require('./base')
-      url = base.Config.prefix + "/bokeh/bb/" + @get('doc') + "/" + @type + "/"
+      url = @get_base().Config.prefix + "bokeh/bb/" + doc + "/" + @type + "/"
       if (@isNew())
         return url
       return url + @get('id') + "/"
-
 
     sync: (method, model, options) ->
       # this should be fixed via monkey patching when extended by an
@@ -253,17 +314,18 @@ define [
       # to enable normal beaviour, add this line
       #
       # HasProperties.prototype.sync = Backbone.sync
-      return options.success(model, null, {})
+      return options.success(model.attributes, null, {})
 
-    defaults: () ->
-      return {}
+    defaults: -> {}
 
     rpc: (funcname, args, kwargs) =>
-      prefix = base.Config.prefix
-      docid = @get('doc')
+      prefix = @get_base().Config.prefix
+      doc = @get('doc')
+      if not doc?
+        throw new Error("Unset 'doc' in " + this)
       id = @get('id')
       type = @type
-      url = "#{prefix}/bokeh/bb/rpc/#{docid}/#{type}/#{id}/#{funcname}/"
+      url = "#{prefix}bokeh/bb/rpc/#{doc}/#{type}/#{id}/#{funcname}/"
       data =
         args: args
         kwargs: kwargs

@@ -1,55 +1,47 @@
+from __future__ import print_function
 
-from numpy import pi, arange, sin, cos
+from numpy import pi, sin, cos
 import numpy as np
-import os.path
 
-from bokeh.objects import (Plot, DataRange1d, LinearAxis, 
-        ObjectArrayDataSource, ColumnDataSource, Glyph,
-        PanTool, ZoomTool)
-from bokeh.glyphs import Line
-from bokeh import session
+from bokeh.browserlib import view
+from bokeh.document import Document
+from bokeh.embed import file_html
+from bokeh.models.glyphs import Line
+from bokeh.models import (
+    Plot, DataRange1d, LinearAxis, ColumnDataSource,
+    PanTool, WheelZoomTool, PreviewSaveTool
+)
+from bokeh.resources import INLINE
 
 x = np.linspace(-2*pi, 2*pi, 1000)
 y = sin(x)
 z = cos(x)
-widths = np.ones_like(x) * 0.02
-heights = np.ones_like(x) * 0.2
 
-source = ColumnDataSource(data=dict(x=x,y=y,z=z,widths=widths,
-            heights=heights))
+source = ColumnDataSource(data=dict(x=x, y=y))
 
 xdr = DataRange1d(sources=[source.columns("x")])
 ydr = DataRange1d(sources=[source.columns("y")])
 
+plot = Plot(x_range=xdr, y_range=ydr, min_border=50)
+
 line_glyph = Line(x="x", y="y", line_color="blue")
+plot.add_glyph(source, line_glyph)
 
-renderer = Glyph(
-        data_source = source,
-        xdata_range = xdr,
-        ydata_range = ydr,
-        glyph = line_glyph
-        )
+plot.add_layout(LinearAxis(), 'below')
+plot.add_layout(LinearAxis(), 'left')
 
-plot = Plot(x_range=xdr, y_range=ydr, data_sources=[source], 
-        border=50)
-xaxis = LinearAxis(plot=plot, dimension=0, location="bottom")
-yaxis = LinearAxis(plot=plot, dimension=1, location="left")
+pan = PanTool()
+wheel_zoom = WheelZoomTool()
+preview_save = PreviewSaveTool()
 
-pantool = PanTool(dataranges = [xdr, ydr], dimensions=["width","height"])
-zoomtool = ZoomTool(dataranges=[xdr,ydr], dimensions=("width","height"))
+plot.add_tools(pan, wheel_zoom, preview_save)
 
-plot.renderers.append(renderer)
-plot.tools = [pantool, zoomtool]
+doc = Document()
+doc.add(plot)
 
-sess = session.HTMLFileSession("line.html")
-sess.add(plot, renderer, xaxis, yaxis, source, xdr, ydr, pantool, zoomtool)
-sess.plotcontext.children.append(plot)
-sess.save(js="relative", css="relative", rootdir=os.path.abspath("."))
-print "Wrote line.html"
-
-try:
-    import webbrowser
-    webbrowser.open("file://" + os.path.abspath("line.html"))
-except:
-    pass
-
+if __name__ == "__main__":
+    filename = "line.html"
+    with open(filename, "w") as f:
+        f.write(file_html(doc, INLINE, "Line Glyph Example"))
+    print("Wrote %s" % filename)
+    view(filename)

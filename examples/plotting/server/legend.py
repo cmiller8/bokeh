@@ -2,6 +2,7 @@
 # Go to http://localhost:5006/bokeh to view this plot
 
 import numpy as np
+
 from bokeh.plotting import *
 
 N = 100
@@ -9,22 +10,28 @@ N = 100
 x = np.linspace(0, 4*np.pi, N)
 y = np.sin(x)
 
-output_server("legend.py example")
+output_server("legend")
 
-hold()
+TOOLS = "pan,wheel_zoom,box_zoom,reset,save,box_select"
 
-scatter(x,y, tools="pan,zoom,resize", legend="sin(x)")
-scatter(x,2*y, tools="pan,zoom,resize", legend="2*sin(x)")
-scatter(x,3*y, color="green", tools="pan,zoom,resize", legend="3*sin(x)")
+p1 = figure(title="Legend Example", tools=TOOLS)
 
-figure()
+p1.circle(x, y, legend="sin(x)")
+p1.circle(x, 2*y, legend="2*sin(x)", color="orange", )
+p1.circle(x, 3*y, legend="3*sin(x)", color="green", )
 
-scatter(x, y, radius=2, tools="pan,zoom,resize,select", legend="sin(x)")
-line(x, y, radius=2, tools="pan,zoom,resize,select", legend="sin(x)")
+p2 = figure(title="Another Legend Example", tools=TOOLS)
 
-line(x, 2*y, line_dash="4 4", line_color="orange", line_width=2, legend="2*sin(x)")
+p2.circle(x, y, legend="sin(x)")
+p2.line(x, y, legend="sin(x)")
 
-scatter(x, 3*y, fill_color=None, line_color="green", radius=4, legend="3*sin(x)")
-line(x, 3*y, fill_color=None, line_color="green", radius=4, legend="3*sin(x)")
+p2.line(x, 2*y, legend="2*sin(x)",
+    line_dash=[4, 4], line_color="orange", line_width=2)
 
-show()
+p2.square(x, 3*y, legend="3*sin(x)",
+    fill_color=None, line_color="green")
+p2.line(x, 3*y, legend="3*sin(x)",
+    fill_color=None, line_color="green")
+
+show(VBox(p1, p2))  # open a browser
+

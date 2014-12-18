@@ -1,107 +1,79 @@
-from geventwebsocket.handler import WebSocketHandler
-from gevent.pywsgi import WSGIServer
-from flask import request, Flask
-import gevent
-import gevent.monkey
-gevent.monkey.patch_all()
-import uuid
-import socket
-import redis
-
-#server imports
-from app import app as bokeh_app
-import wsmanager
-from .. import protocol
-from serverbb import ContinuumModelsStorage
-from .. import bbmodel
-bbmodel.load_special_types()
-#import objects so that we can resolve them
-import bokeh.objects
-import bokeh.glyphs
-import models.user as user
-import models.convenience as mconv
-import models.docs as docs
-import os
-try:
-    from continuumweb import hemlib
-    hemlib.slug_path = os.path.dirname(__file__)
-except ImportError:
-    pass
+from __future__ import absolute_import, print_function
 import logging
+log = logging.getLogger(__name__)
+import atexit
+import os
+import re
+import sys
+import uuid
 import time
 
+from flask import Flask
+from six.moves.queue import Queue
+from tornado.httpserver import HTTPServer
+from tornado import ioloop
 
-PORT = 5006
-REDIS_PORT = 6379
+from .settings import settings as server_settings
+from ..settings import settings as bokeh_settings
+from .flask_gzip import Gzip
+from .server_backends import (
+    FunctionBackend, HDF5DataBackend, InMemoryServerModelStorage,
+    MultiUserAuthentication, RedisServerModelStorage, ShelveServerModelStorage,
+    SingleUserAuthentication,
+)
+from .serverbb import (
+    InMemoryBackboneStorage, RedisBackboneStorage, ShelveBackboneStorage
+)
+from bokeh import plotting # imports custom objects for plugin
+from bokeh import models, protocol # import objects so that we can resolve them
+from bokeh.utils import scale_delta
+# this just shuts up pyflakes
+models, plotting, protocol
+from . import services
+from .app import bokeh_app, app
+from .configure import (configure_flask, make_tornado_app,
+                        register_blueprint, SimpleBokehTornadoApp)
 
-log = logging.getLogger(__name__)
-app = Flask("bokeh.server")
-
-def prepare_app(rhost='127.0.0.1', rport=REDIS_PORT, start_redis=True):
-    #must import views before running apps
-    import views.deps
-    app.register_blueprint(bokeh_app)
-    bokeh_app.redis_port = rport
-    bokeh_app.start_redis = start_redis
-    bokeh_app.wsmanager = wsmanager.WebSocketManager()
-    def auth(auth, docid):
-        doc = docs.Doc.load(bokeh_app.model_redis, docid)
-        status = mconv.can_write_doc_api(doc, auth, bokeh_app)
-        return status
-    bokeh_app.wsmanager.register_auth("bokehplot", auth)
-    bokeh_app.bb_redis = redis.Redis(host=rhost, port=rport, db=2)
-    #for non-backbone models
-    bokeh_app.model_redis = redis.Redis(host=rhost, port=rport, db=3)
-    bokeh_app.pubsub_redis = redis.Redis(host=rhost, port=rport, db=4)
-    bokeh_app.secret_key = str(uuid.uuid4())
-
-def make_default_user(bokeh_app):
-    docid = "defaultdoc"
-    bokehuser = user.new_user(bokeh_app.model_redis, "defaultuser",
-                              str(uuid.uuid4()), apikey='nokey', docs=[])
-
-    return bokehuser
-
-def prepare_local():
-    #monkeypatching
-    def current_user(request):
-        bokehuser = user.User.load(bokeh_app.model_redis, "defaultuser")
-        if bokehuser is None:
-            bokehuser = make_default_user(bokeh_app)
-        return bokehuser
-    def write_plot_file(username, codedata):
-        return
-    bokeh_app.current_user = current_user
-    bokeh_app.write_plot_file = write_plot_file
+def doc_prepare():
+    server_settings.model_backend = {'type' : 'memory'}
+    configure_flask()
+    register_blueprint()
+    return app
 
 http_server = None
+def start_redis():
+    work_dir = getattr(bokeh_app, 'work_dir', os.getcwd())
+    data_file = getattr(bokeh_app, 'data_file', 'redis.db')
+    stdout = getattr(bokeh_app, 'stdout', sys.stdout)
+    stderr = getattr(bokeh_app, 'stdout', sys.stderr)
+    redis_save = getattr(bokeh_app, 'redis_save', True)
+    mproc = services.start_redis(pidfilename=os.path.join(work_dir, "bokehpids.json"),
+                                 port=bokeh_app.backend.get('redis_port', 6379),
+                                 data_dir=work_dir,
+                                 data_file=data_file,
+                                 stdout=stdout,
+                                 stderr=stderr,
+                                save=redis_save)
+    bokeh_app.redis_proc = mproc
 
-import services
-import os
-import atexit
-def start_services():
-    if bokeh_app.start_redis:
-        mproc = services.start_redis("bokehpids.json",
-                                     bokeh_app.redis_port, os.getcwd())
-        bokeh_app.redis_proc = mproc
-    atexit.register(service_exit)
+server = None
 
-def service_exit():
+def start_simple_server(args=None):
+    global server
+    configure_flask(config_argparse=args)
+    if server_settings.model_backend.get('start-redis', False):
+        start_redis()
+    register_blueprint()
+    tornado_app = make_tornado_app(flask_app=app)
+    server = HTTPServer(tornado_app)
+    server.listen(server_settings.port, server_settings.ip)
+    ioloop.IOLoop.instance().start()
+
+def stop():
     if hasattr(bokeh_app, 'redis_proc'):
         bokeh_app.redis_proc.close()
-
-def start_app(verbose=False):
-    global http_server
-    start_services()
-    http_server = WSGIServer(('', PORT), app,
-                             handler_class=WebSocketHandler,
-                             )
-    print "\nStarting Bokeh plot server on port %d..." % PORT
-    print "View http://localhost:%d/bokeh to see plots\n" % PORT
-    http_server.serve_forever()
-
-
-
-#database
-
-#logging
+    server.stop()
+    bokehapp = server.request_callback
+    bokehapp.stop_threads()
+    ioloop.IOLoop.instance().stop()
+    ioloop.IOLoop.instance().clear_instance()

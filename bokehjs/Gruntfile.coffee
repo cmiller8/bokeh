@@ -37,20 +37,21 @@ module.exports = (grunt) ->
         files: [
           expand: true
           cwd: 'demo'
-          src: ['**/*.html', '**/*.js']
+          src: ['**/*.html', '**/*.js', '**/*.css', '**/*.png', '**/*.py']
           dest: 'build/demo'
-          filter: 'isFile'
+          filter: ['isFile']
         ]
       vendor:
-        files : [
-          expand : true
-          cwd : 'src/vendor'
+        files: [
+          expand: true
+          cwd: 'src/vendor'
           src: ['**/*']
           dest : 'build/js/vendor'
         ]
 
-    clean: ['build']
-
+    clean:
+      all : ['build'],
+      css : ['build/css/*.css']
     less:
       development:
         options:
@@ -59,11 +60,12 @@ module.exports = (grunt) ->
           expand: true,        # enable dynamic expansion
           concat: false        # do not concatenate
           cwd: 'src/less',     # src matches are relative to this path
-          src: ['*.less'],     # actual pattern(s) to match
+          src: ['bokeh.less'], # actual pattern(s) to match
           dest: 'build/css',   # destination path prefix
           ext: '.css',         # dest filepaths will have this extension
-          filter: hasChanged("less.development.files.0")
         }]
+    lesslint:
+      src: ['src/less/*.less']
 
     coffee:
       compile:
@@ -81,7 +83,6 @@ module.exports = (grunt) ->
         src: '**/*.coffee'     # traverse *.coffee files relative to cwd
         dest: 'build/test'     # destination for compiled js files
         ext: '.js'             # file extension for compiled files
-        filter: hasChanged("coffee.test")
         options:
           sourceMap : true
       demo:
@@ -90,41 +91,37 @@ module.exports = (grunt) ->
         src: '**/*.coffee'     # traverse *.coffee files relative to cwd
         dest: 'build/demo/js'  # destination for compiled js files
         ext: '.js'             # file extension for compiled files
-        filter: hasChanged("coffee.demo")
         options:
           sourceMap : true
 
     requirejs:
       options:
+        logLevel: 2
         baseUrl: 'build/js'
         name: 'vendor/almond/almond'
-        paths:
-          jquery: "vendor/jquery/jquery"
-          jquery_ui: "vendor/jquery-ui-amd/jquery-ui-1.10.0/jqueryui"
-          jquery_mousewheel: "vendor/jquery-mousewheel/jquery.mousewheel"
-          underscore: "vendor/underscore-amd/underscore"
-          backbone: "vendor/backbone-amd/backbone"
-          bootstrap: "vendor/bootstrap/bootstrap-2.0.4"
-          timezone: "vendor/timezone/src/timezone"
-          sprintf: "vendor/sprintf/src/sprintf"
-        shim:
-          sprintf:
-            exports: 'sprintf'
-        include: ['main', 'underscore']
+        mainConfigFile: 'build/js/config.js'
+        include: ['underscore', 'main']
         fileExclusionRegExp: /^test/
-        wrap: {
-          startFile: 'src/js/_start.js.frag',
+        wrapShim: true
+        wrap:
+          startFile: 'src/js/_start.js.frag'
           endFile: 'src/js/_end.js.frag'
-        }
-      dist:
+      production:
         options:
           optimize: "uglify2"
-          out: 'build/bokeh.min.js'
-      dev:
+          out: 'build/js/bokeh.min.js'
+      development:
         options:
           optimize: "none"
-          out: 'build/bokeh.js'
+          out: 'build/js/bokeh.js'
 
+    cssmin:
+      minify:
+        expand: true
+        cwd: "build/css"
+        src: "bokeh.css"
+        dest: "build/css"
+        ext: '.min.css'
 
     watch:
       coffee:
@@ -136,6 +133,11 @@ module.exports = (grunt) ->
         files: ["<%= coffee.demo.cwd %>/<%= coffee.demo.src %>"]
         tasks: ['coffee:demo']
         options:
+            spawn: false
+      demo_copy:
+        files: ["demo/**/*.html", "demo/**/*.js"]
+        tasks: ['copy:demo']
+        options:
           spawn: false
       test:
         files: ["<%= coffee.test.cwd %>/<%= coffee.test.src %>"]
@@ -143,16 +145,37 @@ module.exports = (grunt) ->
         options:
           spawn: false
       less:
-        files: ["<%= less.development.files[0].cwd %>/<%= less.development.files[0].src %>"]
-        tasks: ['less']
+        files: ["src/less/*"]
+        tasks: ['clean:css', 'less']
         options:
           spawn: false
+      eco:
+        files: ["<%= eco.app.files[0].cwd %>/<%= eco.app.files[0].src %>"]
+        tasks: ['eco']
+        options:
+          spawn: false
+
+    connect:
+      server:
+        options:
+          port: 8000,
+          base: '.'
 
     qunit:
       all:
         options:
           urls:[
-            'http://localhost:8000/build/test/common_test.html']
+            'http://localhost:8000/build/test/common_test.html',
+            'http://localhost:8000/build/test/mapper_test.html',
+            'http://localhost:8000/build/test/range_test.html',
+            'http://localhost:8000/build/test/source_test.html',
+          ]
+
+    groc:
+      coffee: [ "docs/*.coffee", "docs/*.md", "README.md" ]
+      options:
+        out: "docs/html/"
+
     eco:
       app:
         options:
@@ -170,12 +193,19 @@ module.exports = (grunt) ->
   grunt.loadNpmTasks("grunt-contrib-watch")
   grunt.loadNpmTasks("grunt-contrib-less")
   grunt.loadNpmTasks("grunt-contrib-requirejs")
+  grunt.loadNpmTasks("grunt-contrib-cssmin")
   grunt.loadNpmTasks("grunt-contrib-copy")
   grunt.loadNpmTasks("grunt-contrib-clean")
   grunt.loadNpmTasks("grunt-contrib-qunit")
+  grunt.loadNpmTasks("grunt-contrib-connect")
   grunt.loadNpmTasks("grunt-eco")
+  grunt.loadNpmTasks("grunt-groc")
+  grunt.loadNpmTasks('grunt-lesslint')
 
-  grunt.registerTask("default",    ["build", "qunit"])
-  grunt.registerTask("build",      ["coffee", "less", "copy", "eco"])
-  grunt.registerTask("deploy",     ["build",  "requirejs:dist"])
-  grunt.registerTask("devdeploy",  ["build",  "requirejs:dev"])
+  grunt.registerTask("default",   ["build", "test"])
+  grunt.registerTask("buildcopy", ["copy:template", "copy:test", "copy:demo", "copy:vendor"]) # better way??
+  grunt.registerTask("build",     ["coffee", "less", "buildcopy", "eco"])
+  grunt.registerTask("deploy",    ["build",  "requirejs", "cssmin"])
+  grunt.registerTask("test",      ["build", "connect", "qunit"])
+  grunt.registerTask("serve",     ["connect:server:keepalive"])
+  grunt.registerTask("release",   ["deploy", "copy:release"])

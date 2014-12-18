@@ -1,13 +1,16 @@
+from __future__ import absolute_import, print_function
 
-from os import mkdir
-from os.path import exists, expanduser, isdir, join
-import urllib2
+from os import mkdir, remove
+from os.path import exists, expanduser, isdir, join, splitext
+from sys import stdout
+from zipfile import ZipFile
+from six.moves.urllib.request import urlopen
 
 def _bokeh_dir(create=False):
     bokeh_dir = expanduser("~/.bokeh")
     if not exists(bokeh_dir):
         if not create: return bokeh_dir
-        print "Creating ~/.bokeh directory"
+        print("Creating ~/.bokeh directory")
         try:
             mkdir(bokeh_dir)
         except OSError:
@@ -17,7 +20,7 @@ def _bokeh_dir(create=False):
             raise RuntimeError("%s exists but is not a directory" % bokeh_dir)
     return bokeh_dir
 
-def _data_dir(create=False):
+def _data_dir(file_name=None, create=False):
     try:
         import yaml
     except ImportError:
@@ -32,7 +35,7 @@ def _data_dir(create=False):
     if not exists(data_dir):
         if not create:
             raise RuntimeError('bokeh sample data directory does not exist, please execute bokeh.sampledata.download()')
-        print "Creating %s directory" % data_dir
+        print("Creating %s directory" % data_dir)
         try:
             mkdir(data_dir)
         except OSError:
@@ -40,52 +43,72 @@ def _data_dir(create=False):
     else:
         if not isdir(data_dir):
             raise RuntimeError("%s exists but is not a directory" % data_dir)
-    return data_dir
+    if file_name is not None:
+        return join(data_dir, file_name)
+    else:
+        return data_dir
 
-def download():
+def download(progress=True):
     '''
     Download larger data sets for various Bokeh examples.
     '''
-
     data_dir = _data_dir(create=True)
+    print("Using data directory: %s" % data_dir)
 
-    print "Using data directory: %s" % data_dir
-
-    base_url = 'https://s3.amazonaws.com/bokeh_data/'
+    s3 = 'https://s3.amazonaws.com/bokeh_data/'
     files = [
-        'CGM.csv',
-        'US_Counties.csv',
-        'unemployment09.csv',
-        'AAPL.csv',
-        'FB.csv',
-        'GOOG.csv',
-        'IBM.csv',
-        'MSFT.csv',
+        (s3, 'CGM.csv'),
+        (s3, 'US_Counties.zip'),
+        (s3, 'unemployment09.csv'),
+        (s3, 'AAPL.csv'),
+        (s3, 'FB.csv'),
+        (s3, 'GOOG.csv'),
+        (s3, 'IBM.csv'),
+        (s3, 'MSFT.csv'),
+        (s3, 'WPP2012_SA_DB03_POPULATION_QUINQUENNIAL.zip'),
     ]
-    for file_name in files:
-        _getfile(base_url, file_name, data_dir)
 
+    for base_url, file_name in files:
+        _getfile(base_url, file_name, data_dir, progress=progress)
 
-def _getfile(base_url, file_name, data_dir):
+def _getfile(base_url, file_name, data_dir, progress=True):
+    file_url = join(base_url, file_name)
+    file_path = join(data_dir, file_name)
 
-    url = join(base_url, file_name)
-    u = urllib2.urlopen(url)
-    f = open(join(data_dir, file_name), 'wb')
-    meta = u.info()
-    file_size = int(meta.getheaders("Content-Length")[0])
-    print "Downloading: %s Bytes: %s" % (file_name, file_size)
+    url = urlopen(file_url)
 
-    file_size_dl = 0
-    block_sz = 8192
-    while True:
-        buffer = u.read(block_sz)
-        if not buffer:
-            break
+    with open(file_path, 'wb') as file:
+        file_size = int(url.headers["Content-Length"])
+        print("Downloading: %s (%d bytes)" % (file_name, file_size))
 
-        file_size_dl += len(buffer)
-        f.write(buffer)
-        status = r"%10d  [%3.2f%%]" % (file_size_dl, file_size_dl * 100. / file_size)
-        status = status + chr(8)*(len(status)+1)
-        print status,
+        fetch_size = 0
+        block_size = 16384
 
-    f.close()
+        while True:
+            data = url.read(block_size)
+            if not data:
+                break
+
+            fetch_size += len(data)
+            file.write(data)
+
+            if progress:
+                status = "\r%10d [%6.2f%%]" % (fetch_size, fetch_size*100.0/file_size)
+                stdout.write(status)
+                stdout.flush()
+
+    if progress:
+        print()
+
+    real_name, ext = splitext(file_name)
+
+    if ext == '.zip':
+        if not splitext(real_name)[1]:
+            real_name += ".csv"
+
+        print("Unpacking: %s" % real_name)
+
+        with ZipFile(file_path, 'r') as zip_file:
+            zip_file.extract(real_name, data_dir)
+
+        remove(file_path)

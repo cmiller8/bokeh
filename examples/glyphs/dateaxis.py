@@ -1,12 +1,18 @@
-from numpy import pi, arange, sin, cos
+from __future__ import print_function
+
+from numpy import pi, arange, sin
 import numpy as np
-import os.path
 import time
 
-from bokeh.objects import (Plot, DataRange1d, LinearAxis, DatetimeAxis,
-        ColumnDataSource, Glyph, PanTool, ZoomTool)
-from bokeh.glyphs import Circle
-from bokeh import session
+from bokeh.browserlib import view
+from bokeh.document import Document
+from bokeh.embed import file_html
+from bokeh.models.glyphs import Circle
+from bokeh.models import (
+    Plot, DataRange1d, DatetimeAxis,
+    ColumnDataSource, PanTool, WheelZoomTool
+)
+from bokeh.resources import INLINE
 
 x = arange(-2 * pi, 2 * pi, 0.1)
 y = sin(x)
@@ -15,41 +21,29 @@ y = sin(x)
 # for len(x) number of hours.
 times = np.arange(len(x)) * 3600000 + time.time()
 
-source = ColumnDataSource(data=dict(x=x, y=y, times=times))
+source = ColumnDataSource(
+    data=dict(x=x, y=y, times=times)
+)
 
 xdr = DataRange1d(sources=[source.columns("times")])
 ydr = DataRange1d(sources=[source.columns("y")])
 
-circle = Circle(x="times", y="y", fill_color="red", radius=5, line_color="black")
+plot = Plot(x_range=xdr, y_range=ydr, min_border=80)
 
-glyph_renderer = Glyph(
-    data_source=source,
-    xdata_range=xdr,
-    ydata_range=ydr,
-    glyph=circle,
-)
+circle = Circle(x="times", y="y", fill_color="red", size=5, line_color="black")
+plot.add_glyph(source, circle)
 
-plot = Plot(x_range=xdr, y_range=ydr, data_sources=[source],
-            border=80)
-xaxis = DatetimeAxis(plot=plot, dimension=0, location="min")
-yaxis = LinearAxis(plot=plot, dimension=1, location="min")
+plot.add_layout(DatetimeAxis(), 'below')
+plot.add_layout(DatetimeAxis(), 'left')
 
-pantool = PanTool(dataranges=[xdr, ydr], dimensions=["width", "height"])
-zoomtool = ZoomTool(dataranges=[xdr, ydr], dimensions=("width", "height"))
+plot.add_tools(PanTool(), WheelZoomTool())
 
-plot.renderers.append(glyph_renderer)
-plot.tools = [pantool, zoomtool]
+doc = Document()
+doc.add(plot)
 
-FILENAME = __file__.replace(".py", ".html")
-sess = session.HTMLFileSession(FILENAME)
-sess.add(plot, glyph_renderer, source, xaxis, yaxis, xdr, ydr, pantool, zoomtool)
-sess.plotcontext.children.append(plot)
-sess.save(js="relative", css="relative", rootdir=os.path.abspath("."))
-sess.dumpjson(file=__file__.replace(".py", ".json"))
-print "Wrote " + FILENAME
-try:
-    import webbrowser
-
-    webbrowser.open("file://" + os.path.abspath(FILENAME))
-except:
-    pass
+if __name__ == "__main__":
+    filename = "dateaxis.html"
+    with open(filename, "w") as f:
+        f.write(file_html(doc, INLINE, "Date Axis Example"))
+    print("Wrote %s" % filename)
+    view(filename)

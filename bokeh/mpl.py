@@ -1,776 +1,461 @@
+"Supporting objects and functions to convert Matplotlib objects into Bokeh."
+#-----------------------------------------------------------------------------
+# Copyright (c) 2012 - 2014, Continuum Analytics, Inc. All rights reserved.
+#
+# Powered by the Bokeh Development Team.
+#
+# The full license is in the file LICENCE.txt, distributed with this software.
+#-----------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------
+# Imports
+#-----------------------------------------------------------------------------
+
+import itertools
+import warnings
+
+import matplotlib as mpl
+import matplotlib.pyplot as plt
 import numpy as np
-import logging
-import urlparse
-import requests
-import uuid
-import bbmodel
-import protocol
-import data
-import os
-import dump
-import json
-import pandas
-from exceptions import DataIntegrityException
+import pandas as pd
 
-from bokeh import protocol
-from bokeh.utils import get_json
+from .models.glyphs import (Asterisk, Circle, Cross, Diamond, InvertedTriangle, Line,
+                            MultiLine, Patches, Square, Text, Triangle, X)
+from .mplexporter.exporter import Exporter
+from .mplexporter.renderers import Renderer
+from .mpl_helpers import (convert_dashes, delete_last_col, get_props_cycled,
+                          is_ax_end, xkcd_line)
+from .models import (ColumnDataSource, DataRange1d, DatetimeAxis, GlyphRenderer,
+                     Grid, GridPlot, LinearAxis, PanTool, Plot, PreviewSaveTool,
+                     ResetTool, WheelZoomTool)
+from .plotting import (curdoc, output_file, output_notebook, output_server,
+                       show)
 
-log = logging.getLogger(__name__)
-colors = [
-      "#1f77b4",
-      "#ff7f0e", "#ffbb78",
-      "#2ca02c", "#98df8a",
-      "#d62728", "#ff9896",
-      "#9467bd", "#c5b0d5",
-      "#8c564b", "#c49c94",
-      "#e377c2", "#f7b6d2",
-      "#7f7f7f",
-      "#bcbd22", "#dbdb8d",
-      "#17becf", "#9edae5"
-    ]
+#-----------------------------------------------------------------------------
+# Classes and functions
+#-----------------------------------------------------------------------------
 
 
-def script_inject(plotclient, modelid, typename):
-    pc = plotclient
-    f_dict = dict(
-        docid = pc.docid,
-        ws_conn_string = pc.ws_conn_string,
-        docapikey = pc.apikey,
-        root_url = pc.root_url,
-        modelid = modelid,
-        modeltype = typename,
-        script_url = pc.root_url + "/bokeh/embed.js")
-    e_str = '''<script src="%(script_url)s" bokeh_plottype="serverconn"
-bokeh_docid="%(docid)s" bokeh_ws_conn_string="%(ws_conn_string)s"
-bokeh_docapikey="%(docapikey)s" bokeh_root_url="%(root_url)s"
-bokeh_modelid="%(modelid)s" bokeh_modeltype="%(modeltype)s" async="true"></script>        
-        '''
-    return e_str % f_dict
+class BokehRenderer(Renderer):
 
-def script_inject_escaped(plotclient, modelid, typename):
-    pc = plotclient
-    f_dict = dict(
-        docid = pc.docid,
-        ws_conn_string = pc.ws_conn_string,
-        docapikey = pc.apikey,
-        root_url = pc.root_url,
-        modelid = modelid,
-        modeltype = typename,
-        script_url = pc.root_url + "/bokeh/embed.js")
+    def __init__(self, pd_obj, xkcd):
+        "Initial setup."
+        self.fig = None
+        self.pd_obj = pd_obj
+        self.xkcd = xkcd
+        self.source = ColumnDataSource()
+        self.xdr = DataRange1d()
+        self.ydr = DataRange1d()
+        self.non_text = [] # to save the text we don't want to convert by draw_text
 
-    e_str = '''&lt; script src="%(script_url)s" bokeh_plottype="serverconn"
-bokeh_docid="%(docid)s" bokeh_ws_conn_string="%(ws_conn_string)s"
-bokeh_docapikey="%(docapikey)s" bokeh_root_url="%(root_url)s"
-    bokeh_modelid="%(modelid)s" bokeh_modeltype="%(modeltype)s" async="true"&gt; &lt;/script&gt;
-        '''
-    return e_str % f_dict
+    def open_figure(self, fig, props):
+        "Get the main plot properties and create the plot."
+        self.width = int(props['figwidth'] * props['dpi'])
+        self.height = int(props['figheight'] * props['dpi'])
+        self.plot = Plot(x_range=self.xdr,
+                         y_range=self.ydr,
+                         plot_width=self.width,
+                         plot_height=self.height)
 
+    def close_figure(self, fig):
+        "Complete the plot: add tools."
+        # Add tools
+        pan = PanTool()
+        wheelzoom = WheelZoomTool()
+        reset = ResetTool()
+        previewsave = PreviewSaveTool()
+        self.plot.add_tools(pan, wheelzoom, reset, previewsave)
 
-class BokehMPLBase(object):
-    def __init__(self, *args, **kwargs):
-        if 'plotclient' in kwargs:
-            self.plotclient = kwargs['plotclient']
+        # Simple or Grid plot setup
+        if len(fig.axes) <= 1:
+            self.fig = self.plot
+        else:
+            # This list comprehension splits the plot.renderers list at the "marker"
+            # points returning small sublists corresponding with each subplot.
+            subrends = [list(x[1]) for x in itertools.groupby(
+                        self.plot.renderers, lambda x: is_ax_end(x)) if not x[0]]
+            plots = []
+            for i, axes in enumerate(fig.axes):
+                # create a new plot for each subplot
+                _plot = Plot(x_range=self.xdr,
+                             y_range=self.ydr,
+                             plot_width=self.width,
+                             plot_height=self.height)
+                _plot.title = ""
+                # and add new tools
+                _pan = PanTool()
+                _wheelzoom = WheelZoomTool()
+                _reset = ResetTool()
+                _previewsave = PreviewSaveTool()
+                _plot.add_tools(_pan, _wheelzoom, _reset, _previewsave)
+                # clean the plot ref from axis and grids
+                _plot_rends = subrends[i]
+                for r in _plot_rends:
+                    if not isinstance(r, GlyphRenderer):
+                        r.plot = None
+                # add all the renderers into the new subplot
+                _plot.add_layout(_plot_rends[0], 'below')  # xaxis
+                _plot.add_layout(_plot_rends[1], 'left')  # yaxis
+                _plot.add_layout(_plot_rends[2])  # xgrid
+                _plot.add_layout(_plot_rends[3])  # ygrid
+                for r in _plot_rends[4:]:  # all the glyphs
+                    _plot.renderers.append(r)
+                plots.append(_plot)
+            (a, b, c) = fig.axes[0].get_geometry()
+            p = np.array(plots)
+            n = np.resize(p, (a, b))
+            grid = GridPlot(children=n.tolist())
+            self.fig = grid
 
-    def update(self):
-        if self.plotclient.bbclient:
-            self.plotclient.bbclient.upsert_all(self.allmodels())
+    def open_axes(self, ax, props):
+        "Get axes data and create the axes and grids"
+        # Get axes, title and grid into class attributes.
+        self.ax = ax
+        self.plot.title = ax.get_title()
+        # to avoid title conversion by draw_text later
+        self.non_text.append(self.plot.title)
+        self.grid = ax.get_xgridlines()[0]
 
+        # Add axis
+        bxaxis = self.make_axis(ax.xaxis, "below", props['xscale'])
+        byaxis = self.make_axis(ax.yaxis, "left", props['yscale'])
 
-    @property
-    def foo(self):
-        return "bar"
+        # Add grids
+        self.make_grid(bxaxis, 0)
+        self.make_grid(byaxis, 1)
 
-    def _repr_html_(self):
-        html = self.plotclient.make_html(
-            self.allmodels(),
-            model=getattr(self, self.topmodel),
-            template="basediv.html",
-            script_paths=[],
-            css_paths=[]
-            )
-        html = html.encode('utf-8')
-        return html
+        # Setup collections info
+        nones = ("", " ", "None", "none", None)
+        cols = [col for col in self.ax.collections if col.get_paths() not in nones]
 
-    def script_inject(self):
-        return script_inject(
-            self.plotclient, self.plotmodel.id, self.plotmodel.typename)
+        # Add collections renderers
+        [self.make_line_collection(col) for col in cols if isinstance(col, mpl.collections.LineCollection)]
+        [self.make_poly_collection(col) for col in cols if isinstance(col, mpl.collections.PolyCollection)]
 
-    def htmldump(self, path=None):
-        """ If **path** is provided, then writes output to a file,
-        else returns the output as a string.
+    def close_axes(self, ax):
+        "Complete the axes adding axes-dependent plot props"
+        background_fill = ax.get_axis_bgcolor()
+        if background_fill == 'w':
+            background_fill = 'white'
+        self.plot.background_fill = background_fill
+        if self.xkcd:
+            self.plot.title_text_font = "Comic Sans MS, Textile, cursive"
+            self.plot.title_text_font_style = "bold"
+            self.plot.title_text_color = "black"
+
+        # Add a "marker" Glyph to help the plot.renderers splitting in the GridPlot build
+        dummy_source = ColumnDataSource(data=dict(name="ax_end"))
+        self.plot.renderers.append(GlyphRenderer(data_source=dummy_source, glyph=X()))
+
+    def open_legend(self, legend, props):
+        pass
+
+    def close_legend(self, legend):
+        pass
+
+    def draw_line(self, data, coordinates, style, label, mplobj=None):
+        "Given a mpl line2d instance create a Bokeh Line glyph."
+        _x = data[:, 0]
+        if self.pd_obj is True:
+            try:
+                x = [pd.Period(ordinal=int(i), freq=self.ax.xaxis.freq).to_timestamp() for i in _x]
+            except AttributeError as e: #  we probably can make this one more intelligent later
+                x = _x
+        else:
+            x = _x
+
+        y = data[:, 1]
+        if self.xkcd:
+            x, y = xkcd_line(x, y)
+
+        line = Line()
+        line.x = self.source.add(x)
+        line.y = self.source.add(y)
+        self.xdr.sources.append(self.source.columns(line.x))
+        self.ydr.sources.append(self.source.columns(line.y))
+
+        line.line_color = style['color']
+        line.line_width = style['linewidth']
+        line.line_alpha = style['alpha']
+        line.line_dash = [int(i) for i in style['dasharray'].split(",")]  # str2list(int)
+        #style['zorder'] # not in Bokeh
+        #line.line_join = line2d.get_solid_joinstyle() # not in mplexporter
+        #line.line_cap = cap_style_map[line2d.get_solid_capstyle()] # not in mplexporter
+        if self.xkcd:
+            line.line_width = 3
+
+        self.plot.add_glyph(self.source, line)
+
+    def draw_markers(self, data, coordinates, style, label, mplobj=None):
+        "Given a mpl line2d instance create a Bokeh Marker glyph."
+        x = data[:, 0]
+        y = data[:, 1]
+
+        marker_map = {
+            "o": Circle,
+            "s": Square,
+            "+": Cross,
+            "^": Triangle,
+            "v": InvertedTriangle,
+            "x": X,
+            "D": Diamond,
+            "*": Asterisk,
+        }
+       
+        # Not all matplotlib markers are currently handled; fall back to Circle if we encounter an
+        # unhandled marker.  See http://matplotlib.org/api/markers_api.html for a list of markers.
+        try:
+            marker = marker_map[style['marker']]()
+        except KeyError:
+            warnings.warn("Unable to handle marker: %s; defaulting to Circle" % style['marker'])
+            marker = Circle()
+        marker.x = self.source.add(x)
+        marker.y = self.source.add(y)
+        self.xdr.sources.append(self.source.columns(marker.x))
+        self.ydr.sources.append(self.source.columns(marker.y))
+
+        marker.line_color = style['edgecolor']
+        marker.fill_color = style['facecolor']
+        marker.line_width = style['edgewidth']
+        marker.size = style['markersize']
+        marker.fill_alpha = marker.line_alpha = style['alpha']
+        #style['zorder'] # not in Bokeh
+
+        self.plot.add_glyph(self.source, marker)
+
+    def draw_path_collection(self, paths, path_coordinates, path_transforms,
+                             offsets, offset_coordinates, offset_order,
+                             styles, mplobj=None):
+        """Path not implemented in Bokeh, but we have our own line ans poly
+        collection implementations, so passing here to avoid the NonImplemented
+        error.
         """
-        html = self.plotclient.make_html(self.allmodels(),
-                                         model=getattr(self, self.topmodel),
-                                         template="bokeh.html"
-                                         )
-        if path:
-            with open(path, "w+") as f:
-                f.write(html.encode("utf-8"))
+        pass
+
+    def draw_text(self, text, position, coordinates, style,
+                  text_type=None, mplobj=None):
+        "Given a mpl text instance create a Bokeh Text glyph."
+        # mpl give you the title and axes names as a text object (with specific locations)
+        # inside the plot itself. That does not make sense inside Bokeh, so we
+        # just skip the title and axes names from the conversion and covert any other text.
+        if text not in self.non_text:
+          x, y = position
+          text = Text(x=x, y=y, text=[text])
+
+          alignment_map = {"center": "middle", "top": "top", "bottom": "bottom", "baseline": "bottom"}
+          # baseline not implemented in Bokeh, deafulting to bottom.
+          text.text_alpha = style['alpha']
+          text.text_font_size = "%dpx" % style['fontsize']
+          text.text_color = style['color']
+          text.text_align = style['halign']
+          text.text_baseline = alignment_map[style['valign']]
+          text.angle = style['rotation']
+          #style['zorder'] # not in Bokeh
+
+          ## Using get_fontname() works, but it's oftentimes not available in the browser,
+          ## so it's better to just use the font family here.
+          #text.text_font = mplText.get_fontname()) not in mplexporter
+          #text.text_font = mplText.get_fontfamily()[0] # not in mplexporter
+          #text.text_font_style = fontstyle_map[mplText.get_fontstyle()] # not in mplexporter
+          ## we don't really have the full range of font weights, but at least handle bold
+          #if mplText.get_weight() in ("bold", "heavy"):
+              #text.text_font_style = bold
+
+          self.plot.add_glyph(self.source, text)
+
+    def draw_image(self, imdata, extent, coordinates, style, mplobj=None):
+        pass
+
+    def make_axis(self, ax, location, scale):
+        "Given a mpl axes instance, returns a Bokeh LinearAxis object."
+        # TODO:
+        #  * handle log scaling
+        #  * map `labelpad` to `major_label_standoff`
+        #  * deal with minor ticks once BokehJS supports them
+        #  * handle custom tick locations once that is added to bokehJS
+
+        # we need to keep the current axes names to avoid writing them in draw_text
+        self.non_text.append(ax.get_label_text())
+
+        if scale == "linear":
+            laxis = LinearAxis(axis_label=ax.get_label_text())
+        elif scale == "date":
+            laxis = DatetimeAxis(axis_label=ax.get_label_text())
+
+        self.plot.add_layout(laxis, location)
+
+        # First get the label properties by getting an mpl.Text object
+        #label = ax.get_label()
+        #self.text_props(label, laxis, prefix="axis_label_")
+        #self.draw_text(label, position, coordinates, style, text_type="axis_label_")
+
+        # To get the tick label format, we look at the first of the tick labels
+        # and assume the rest are formatted similarly.
+        #ticktext = ax.get_ticklabels()[0]
+        #self.text_props(ticktext, laxis, prefix="major_label_")
+        #self.draw_text(ticktext, position, coordinates, style, text_type="major_label_")
+
+        #newaxis.bounds = axis.get_data_interval()  # I think this is the right func...
+
+        if self.xkcd:
+            laxis.axis_line_width = 3
+            laxis.axis_label_text_font = "Comic Sans MS, Textile, cursive"
+            laxis.axis_label_text_font_style = "bold"
+            laxis.axis_label_text_color = "black"
+            laxis.major_label_text_font = "Comic Sans MS, Textile, cursive"
+            laxis.major_label_text_font_style = "bold"
+            laxis.major_label_text_color = "black"
+
+        return laxis
+
+    def make_grid(self, baxis, dimension):
+        "Given a mpl axes instance, returns a Bokeh Grid object."
+        lgrid = Grid(dimension=dimension,
+                     ticker=baxis.ticker,
+                     grid_line_color=self.grid.get_color(),
+                     grid_line_width=self.grid.get_linewidth())
+
+        self.plot.add_layout(lgrid)
+
+    def make_line_collection(self, col):
+        "Given a mpl collection instance create a Bokeh MultiLine glyph."
+        xydata = col.get_segments()
+        t_xydata = [np.transpose(seg) for seg in xydata]
+        xs = [t_xydata[x][0] for x in range(len(t_xydata))]
+        ys = [t_xydata[x][1] for x in range(len(t_xydata))]
+        if self.xkcd:
+            xkcd_xs = [xkcd_line(xs[i], ys[i])[0] for i in range(len(xs))]
+            xkcd_ys = [xkcd_line(xs[i], ys[i])[1] for i in range(len(ys))]
+            xs = xkcd_xs
+            ys = xkcd_ys
+
+        multiline = MultiLine()
+        multiline.xs = self.source.add(xs)
+        multiline.ys = self.source.add(ys)
+        self.xdr.sources.append(self.source.columns(multiline.xs))
+        self.ydr.sources.append(self.source.columns(multiline.ys))
+
+        self.multiline_props(multiline, col)
+
+        self.plot.add_glyph(self.source, multiline)
+
+    def make_poly_collection(self, col):
+        "Given a mpl collection instance create a Bokeh Patches glyph."
+        paths = col.get_paths()
+        polygons = [paths[i].to_polygons() for i in range(len(paths))]
+        polygons = [np.transpose(delete_last_col(polygon)) for polygon in polygons]
+        xs = [polygons[i][0] for i in range(len(polygons))]
+        ys = [polygons[i][1] for i in range(len(polygons))]
+
+        patches = Patches()
+        patches.xs = self.source.add(xs)
+        patches.ys = self.source.add(ys)
+        self.xdr.sources.append(self.source.columns(patches.xs))
+        self.ydr.sources.append(self.source.columns(patches.ys))
+
+        self.patches_props(patches, col)
+
+        self.plot.add_glyph(self.source, patches)
+
+    def multiline_props(self, multiline, col):
+        "Takes a mpl collection object to extract and set up some Bokeh multiline properties."
+        colors = get_props_cycled(col, col.get_colors(), fx=lambda x: mpl.colors.rgb2hex(x))
+        widths = get_props_cycled(col, col.get_linewidth())
+        multiline.line_color = self.source.add(colors)
+        multiline.line_width = self.source.add(widths)
+        multiline.line_alpha = col.get_alpha()
+        offset = col.get_linestyle()[0][0]
+        if not col.get_linestyle()[0][1]:
+            on_off = []
         else:
-            return html.encode("utf-8")
+            on_off = map(int,col.get_linestyle()[0][1])
+        multiline.line_dash_offset = convert_dashes(offset)
+        multiline.line_dash = list(convert_dashes(tuple(on_off)))
 
-class PandasTable(BokehMPLBase):
-    topmodel = 'pivotmodel'
-    def __init__(self, pivotmodel, plotclient=None):
-        super(PandasTable, self).__init__(pivotmodel, plotclient=plotclient)
-        self.pivotmodel = pivotmodel
-        if hasattr(self.pivotmodel, 'pandassource'):
-            self.pandassource = self.pivotmodel.pandassource
-
-    def groupby(self, columns):
-        self.pivotmodel.set('groups', columns)
-        self.plotclient.bbclient.update(self.pivotmodel)
-
-    def agg(self, agg):
-        self.pivotmodel.set('agg', agg)
-        self.plotclient.bbclient.update(self.pivotmodel)
-
-    def sort(self, sort=None, direction=None):
-        if sort is None:
-            sort = []
-        elif isinstance(sort, basestring):
-            if direction is None: direction = True
-            sort = [{'column' : sort, 'direction' : direction}]
+    def patches_props(self, patches, col):
+        "Takes a mpl collection object to extract and set up some Bokeh patches properties."
+        face_colors = get_props_cycled(col, col.get_facecolors(), fx=lambda x: mpl.colors.rgb2hex(x))
+        patches.fill_color = self.source.add(face_colors)
+        edge_colors = get_props_cycled(col, col.get_edgecolors(), fx=lambda x: mpl.colors.rgb2hex(x))
+        patches.line_color = self.source.add(edge_colors)
+        widths = get_props_cycled(col, col.get_linewidth())
+        patches.line_width = self.source.add(widths)
+        patches.line_alpha = col.get_alpha()
+        offset = col.get_linestyle()[0][0]
+        if not col.get_linestyle()[0][1]:
+            on_off = []
         else:
-            if direction is None: direction = [True for x in sort]
-            sort = [{'column' : s, 'direction' : d} for
-                    s, d in zip(sort, direction)]
-        self.pivotmodel.set('sort', sort)
-        self.plotclient.bbclient.update(self.pivotmodel)
-
-    def paginate(self, offset, length):
-        self.pivotmodel.set('offset', offset)
-        self.pivotmodel.set('length', length)
-        self.plotclient.bbclient.update(self.pivotmodel)
-
-    def data(self):
-        self.pivotmodel.pull()
-        return self.pivotmodel.get_data()
-
-    def allmodels(self):
-        models = [self.pivotmodel, self.pivotmodel.pandassource]
-        return models
+            on_off = map(int,col.get_linestyle()[0][1])
+        patches.line_dash_offset = convert_dashes(offset)
+        patches.line_dash = list(convert_dashes(tuple(on_off)))
 
 
-class GridPlot(BokehMPLBase):
-    topmodel = 'gridmodel'
-    def __init__(self, container, children, title, plotclient=None):
-        self.gridmodel = container
-        self.children = children
-        self.title = title
-        super(GridPlot, self).__init__(container, children, title,
-                                       plotclient=plotclient)
+def to_bokeh(fig=None, name=None, server=None, notebook=False, pd_obj=True,
+             xkcd=False):
+    """ Uses bokeh to display a Matplotlib Figure.
 
-    def allmodels(self):
-        models = [self.gridmodel]
-        for row in self.children:
-            for plot in row:
-                models.extend(plot.allmodels())
-        return models
+    You can store a bokeh plot in a standalone HTML file, as a document in
+    a Bokeh plot server, or embedded directly into an IPython Notebook
+    output cell.
 
+    Parameters
+    ----------
 
-class XYPlot(BokehMPLBase):
-    topmodel = 'plotmodel'
-    def __init__(self, plot, xdata_range, ydata_range,
-                 xaxis, yaxis, pantool, zoomtool, selectiontool, embedtool,
-                 selectionoverlay, parent, plotclient=None):
-        super(XYPlot, self).__init__(
-            plot, xdata_range, ydata_range, xaxis, yaxis,
-            pantool, zoomtool, selectiontool, selectionoverlay, parent,
-            plotclient=plotclient)
-        self.plotmodel = plot
-        self.xdata_range = xdata_range
-        self.ydata_range = ydata_range
-        self.pantool = pantool
-        self.zoomtool = zoomtool
-        self.selectiontool = selectiontool
-        self.embedtool = embedtool
-        self.selectionoverlay = selectionoverlay
-        self.xaxis = xaxis
-        self.yaxis = yaxis
-        self.parent = parent
-        self.last_source = None
-        self.color_index = 0
-        self.renderers = []
-        self.data_sources = []
-        self.update()
+    fig: matplotlib.figure.Figure
+        The figure to display. If None or not specified, then the current figure
+        will be used.
 
-    def allmodels(self):
-        models =  [self.plotmodel,
-                   self.xdata_range,
-                   self.ydata_range,
-                   self.pantool,
-                   self.zoomtool,
-                   self.selectiontool,
-                   self.embedtool,
-                   self.selectionoverlay,
-                   self.xaxis,
-                   self.yaxis]
-        models += self.renderers
-        models += self.data_sources
-        for source in self.data_sources:
-            if hasattr(source, 'typename') and \
-                    source.typename == 'PandasPlotSource' and \
-                    hasattr(self, 'pandassource'):
-                models.append(source.pandassource)
-        return models
+    name: str (default=None)
+        If this option is provided, then the Bokeh figure will be saved into
+        this HTML file, and then a web browser will used to display it.
 
-    def scatter(self, *args, **kwargs):
-        kwargs['scatter'] = True
-        return self.plot(*args, **kwargs)
+    server: str (default=None)
+        Fully specified URL of bokeh plot server. Default bokeh plot server
+        URL is "http://localhost:5006" or simply "deault"
 
-    def plot(self, x, y=None, color=None, data_source=None,
-             scatter=False):
-        if data_source and (data_source.typename == 'PandasDataSource'):
-            if self.plotclient.plot_sources.get(data_source.id):
-                data_source = self.plotclient.plot_sources.get(data_source.id)
+    notebook: bool (default=False)
+        Return an output value from this function which represents an HTML
+        object that the IPython notebook can display. You can also use it with
+        a bokeh plot server just specifying the URL.
+
+    pd_obj: bool (default=True)
+        The implementation asumes you are plotting using the pandas.
+        You have the option to turn it off (False) to plot the datetime xaxis
+        with other non-pandas interfaces.
+
+    xkcd: bool (default=False)
+        If this option is True, then the Bokeh figure will be saved with a
+        xkcd style.
+    """
+
+    if fig is None:
+        fig = plt.gcf()
+
+    if any([name, server, notebook]):
+        if name:
+            if not server:
+                filename = name + ".html"
+                output_file(filename)
             else:
-                plotsource = self.plotclient.model(
-                    'PandasPlotSource', pandassourceobj=data_source)
-                self.plotclient.plot_sources[data_source.id] = plotsource
-                plotsource.update()
-                data_source = plotsource
-        def source_from_array(x, y):
-            if y.ndim == 1:
-                source = self.plotclient.make_source(x=x, y=y)
-                xfield = 'x'
-                yfields = ['y']
-            elif y.ndim == 2:
-                kwargs = {}
-                kwargs['x'] = x
-                colnames = []
-                for colnum in range(y.shape[1]):
-                    colname = 'y' + str(colnum)
-                    kwargs[colname] = y[:,colnum]
-                    colnames.append(colname)
-                source = self.plotclient.make_source(**kwargs)
-                xfield = 'x'
-                yfields = colnames
+                output_server(name, url=server)
+        elif server:
+            if not notebook:
+                output_server("unnameuuuuuuuuuuuuuud", url=server)
             else:
-                raise Exception, "too many dims"
-            return source, xfield, yfields
-        if not isinstance(x, basestring):
-            if y is None:
-                y = x
-                x = range(len(y))
-                if isinstance(y, np.ndarray):
-                    source, xfield, yfields = source_from_array(x, y)
-                else:
-                    source = self.plotclient.make_source(x=x, y=y)
-                    xfield, yfields = ('x', ['y'])
-            else:
-                if isinstance(y, np.ndarray):
-                    source, xfield, yfields = source_from_array(x, y)
-                else:
-                    source = self.plotclient.make_source(x=x, y=y)
-                    xfield, yfields = ('x', ['y'])
-        else:
-            xfield = x
-            if y is None:
-                raise Exception, 'must specify X and Y when calling with strings'
-            yfields = [y]
-            if data_source:
-                source = data_source
-            else:
-                source = self.last_source
-        self.last_source = source
-        for yfield in yfields:
-            if color is None:
-                use_color = colors[self.color_index % len(colors)]
-            else:
-                use_color = color
-            self.color_index += 1
-            self.scatter(xfield, yfield, source, use_color)
-            if not scatter:
-                self.line(xfield, yfield, source, use_color)
+                output_notebook(url=server)
+        elif notebook:
+            output_notebook()
+    else:
+        output_file("Unnamed.html")
 
-    def ensure_source_exists(self, sourcerefs, source, columns):
-        sources = [x for x in sourcerefs if x['ref']['id'] == source.get('id')]
-        existed = True
-        if len(sources) == 0:
-            sourcerefs.append({'ref' : source.ref(), 'columns' : columns})
-            existed = False
-        else:
-            for col in columns:
-                if col not in sources[0]['columns']:
-                    sources[0]['columns'].append(col)
-                    existed = False
-        return existed
+    doc = curdoc()
 
-    def scatter(self, x, y, data_source, color):
-        update = []
-        existed = self.ensure_source_exists(
-            self.xdata_range.get('sources'),
-            data_source, [x])
-        if not existed : update.append(self.xdata_range)
-        existed = self.ensure_source_exists(
-            self.ydata_range.get('sources'),
-            data_source, [y])
-        if not existed : update.append(self.ydata_range)
-        scatterrenderer = self.plotclient.model(
-            'ScatterRenderer',
-            foreground_color=color,
-            data_source=data_source.ref(),
-            xfield=x,
-            yfield=y,
-            xdata_range=self.xdata_range.ref(),
-            ydata_range=self.ydata_range.ref(),
-            parent=self.plotmodel.ref())
-        self.renderers.append(scatterrenderer)
-        if data_source not in self.data_sources:
-            self.data_sources.append(data_source)
-        self.plotmodel.get('renderers').append(scatterrenderer.ref())
-        self.selectiontool.get('renderers').append(scatterrenderer.ref())
-        update.append(scatterrenderer)
-        update.append(self.plotmodel)
-        update.append(self.selectiontool)
-        update.append(self.embedtool)
-        update.append(self.selectionoverlay)
-        if self.plotclient.bbclient:
-            self.plotclient.bbclient.upsert_all(update)
-        self.plotclient.show(self.plotmodel)
+    renderer = BokehRenderer(pd_obj, xkcd)
+    exporter = Exporter(renderer)
 
-    def line(self, x, y, data_source, color):
-        update = []
-        existed = self.ensure_source_exists(
-            self.xdata_range.get('sources'),
-            data_source, [x])
-        if not existed : update.append(self.xdata_range)
-        existed = self.ensure_source_exists(
-            self.ydata_range.get('sources'),
-            data_source, [y])
-        if not existed : update.append(self.ydata_range)
-        linerenderer = self.plotclient.model(
-            'LineRenderer',
-            foreground_color=color,
-            data_source=data_source.ref(),
-            xfield=x,
-            yfield=y,
-            xdata_range=self.xdata_range.ref(),
-            ydata_range=self.ydata_range.ref(),
-            parent=self.plotmodel.ref())
-        self.renderers.append(linerenderer)
-        if data_source not in self.data_sources:
-            self.data_sources.append(data_source)
-        self.plotmodel.get('renderers').append(linerenderer.ref())
-        update.append(linerenderer)
-        update.append(self.plotmodel)
-        update.append(self.selectiontool)
-        update.append(self.embedtool)
-        update.append(self.selectionoverlay)
-        if self.plotclient.bbclient:
-            self.plotclient.bbclient.upsert_all(update)
-        self.plotclient.show(self.plotmodel)
+    exporter.run(fig)
 
+    doc._current_plot = renderer.fig  # TODO (bev) do not rely on private attrs
+    doc.add(renderer.fig)
 
-class PlotClient(object):
-    def __init__(self, username=None,
-                 serverloc=None,
-                 userapikey="nokey"):
-        #the root url should be just protocol://domain
-        self.username = username
-        self.root_url = serverloc
-        self.session = requests.session()
-        self.session.headers.update({'content-type':'application/json'})
-        self.session.headers.update({'BOKEHUSER-API-KEY' : userapikey})
-        self.session.headers.update({'BOKEHUSER' : username})
-        if self.root_url:
-            self.update_userinfo()
-        else:
-            print 'Not using a server, plots will only work in embedded mode'
-        self.docid = None
-        self.models = {}
-        self.clf()
-        self._hold = True
-        self.bbclient = None
-        self.ic = self.model('PlotContext', children=[])
-
-        # Caching pandas plot source so we can be smart about reusing them
-        self.plot_sources = {}
-
-    @property
-    def ws_conn_string(self):
-        split = urlparse.urlsplit(self.root_url)
-        #how to fix this in bokeh and wakari?
-        if split.scheme == 'http':
-            return "ws://%s/bokeh/sub" % split.netloc
-        else:
-            return "wss://%s/bokeh/sub" % split.netloc
-    def update_userinfo(self):
-        url = urlparse.urljoin(self.root_url, '/bokeh/userinfo/')
-        self.userinfo = get_json(self.session.get(url, verify=False))
-
-    def load_doc(self, docid):
-        url = urlparse.urljoin(self.root_url,"/bokeh/getdocapikey/%s" % docid)
-        resp = self.session.get(url, verify=False)
-        if resp.status_code == 401:
-            raise Exception, 'unauthorized'
-        apikey = get_json(resp)
-        if 'apikey' in apikey:
-            self.docid = docid
-            self.apikey = apikey['apikey']
-            print 'got read write apikey'
-        else:
-            self.docid = docid
-            self.apikey = apikey['readonlyapikey']
-            print 'got read only apikey'
-        self.models = {}
-        url = urlparse.urljoin(self.root_url, "/bokeh/bb/")
-        self.bbclient = bbmodel.ContinuumModelsClient(
-            docid, url, self.apikey)
-        interactive_contexts = self.bbclient.fetch(
-            typename='PlotContext')
-        if len(interactive_contexts) > 1:
-            print 'warning, multiple plot contexts here...'
-        self.ic = interactive_contexts[0]
-
-    def make_doc(self, title):
-        url = urlparse.urljoin(self.root_url,"/bokeh/doc/")
-        data = protocol.serialize_web({'title' : title})
-        response = self.session.post(url, data=data, verify=False)
-        if response.status_code == 409:
-            raise DataIntegrityException
-        self.userinfo = get_json(response)
-
-    def remove_doc(self, title):
-        matching = [x for x in self.userinfo['docs'] \
-                    if x.get('title') == title]
-        docid = matching[0]['docid']
-        url = urlparse.urljoin(self.root_url,"/bokeh/doc/%s/" % docid)
-        response = self.session.delete(url, verify=False)
-        if response.status_code == 409:
-            raise DataIntegrityException
-        self.userinfo = get_json(response)
-
-    def use_doc(self, name):
-        self.docname = name
-        docs = self.userinfo.get('docs')
-        matching = [x for x in docs if x.get('title') == name]
-        if len(matching) > 1:
-            print 'warning, multiple documents with that title'
-        if len(matching) == 0:
-            print 'no documents found, creating new document'
-            self.make_doc(name)
-            return self.use_doc(name)
-            docs = self.userinfo.get('docs')
-            matching = [x for x in docs if x.get('title') == name]
-        self.load_doc(matching[0]['docid'])
-
-    def notebook_connect(self):
-        import IPython.core.displaypub as displaypub
-        js = get_template('connect.js').render(
-            username=self.username,
-            root_url = self.root_url,
-            docid=self.docid,
-            docapikey=self.apikey,
-            ws_conn_string=self.ws_conn_string
-            )
-        msg = """ <p>Connection Information for this %s document, only share with people you trust </p> """  % self.docname
-        html = self.html(
-            script_paths=[],
-            css_paths=[],
-            js_snippets=[js],
-            html_snippets=[msg],
-            template="basediv.html"
-            )
-        displaypub.publish_display_data('bokeh', {'text/html': html})
-        return None
-
-    def notebooksources(self):
-        import IPython.core.displaypub as displaypub        
-        html = self.html(template="basediv.html",
-                         script_paths = dump.notebookscript_paths,
-                         html_snippets=["<p>Bokeh Sources</p>"])
-        displaypub.publish_display_data('bokeh', {'text/html': html})
-        return None
-
-    def model(self, typename, **kwargs):
-        if 'client' not in kwargs and self.bbclient:
-            kwargs['client'] = self.bbclient
-        model = bbmodel.make_model(typename, **kwargs)
-
-        model.set('doc', self.docid)
-        if hasattr(self, "apikey"):
-            model.set('script_inject_escaped', script_inject_escaped(
-                self, model.id, typename))
-        self.models[model.id] = model
-        return model
-
-    def hold(self, val):
-        if val == 'on':
-            self._hold = True
-        elif val == 'off':
-            self._hold = False
-        else:
-            self._hold = val
-
-    def make_source(self, *args, **kwargs):
-        """call this with either kwargs of vectors, or a pandas dataframe
-        """
-        if len(args) > 0:
-            df = args[0]
-            model = self.model('PandasDataSource', df=df)
-        else:
-            output = data.make_source(**kwargs)
-            model = self.model(
-                'ObjectArrayDataSource',
-                data=output
-                )
-        if self.bbclient:
-            self.bbclient.create(model)
-        return model
-    def _newxyplot(self, title=None, width=300, height=300,
-                   is_x_date=False, is_y_date=False,
-                   container=None):
-        """
-        Parameters
-        ----------
-        x : string of fieldname in data_source, or 1d vector
-        y : string of fieldname in data_source or 1d_vector
-        data_source : optional if x,y are not strings,
-            backbonemodel of a data source
-        container : bbmodel of container viewmodel
-
-        Returns
-        ----------
-        """
-        plot = self.model('Plot', width=width, height=height)
-        if self.bbclient:
-            plot.set('docapikey', self.apikey)
-            plot.set('baseurl', self.bbclient.baseurl)
-            
-        if container:
-            parent = container
-            plot.set('parent', container.ref())
-        else:
-            parent = self.ic
-            plot.set('parent', self.ic.ref())
-        if title is not None: plot.set('title', title)
-        xdata_range = self.model(
-            'DataRange1d',
-            sources=[]
-            )
-        ydata_range = self.model(
-            'DataRange1d',
-            sources=[]
-            )
-        axisclass = 'LinearAxis'
-        if is_x_date: axisclass = 'LinearDateAxis'
-        xaxis = self.model(
-            axisclass, orientation='bottom', ticks=3,
-            data_range=xdata_range.ref(), parent=plot.ref())
-        axisclass = 'LinearAxis'
-        if is_y_date: axisclass = 'LinearDateAxis'
-        yaxis = self.model(
-            axisclass, orientation='left', ticks=3,
-            data_range=ydata_range.ref(), parent=plot.ref())
-        pantool = self.model(
-            'PanTool',
-            dataranges=[xdata_range.ref(), ydata_range.ref()],
-            dimensions=['width', 'height']
-            )
-        zoomtool = self.model(
-            'ZoomTool',
-            dataranges=[xdata_range.ref(), ydata_range.ref()],
-            dimensions=['width', 'height']
-            )
-        selecttool = self.model(
-            'BoxSelectTool',
-            renderers=[])       
-        embedtool = self.model(
-            'EmbedTool')
-        selectoverlay = self.model(
-            'BoxSelectionOverlay',
-            tool=selecttool.ref())
-        plot.set('renderers', [])
-        plot.set('axes', [xaxis.ref(), yaxis.ref()])
-        plot.set('tools', [pantool.ref(), zoomtool.ref(), selecttool.ref(), embedtool.ref()])
-        plot.set('overlays', [selectoverlay.ref()])
-        output = XYPlot(
-            plot, xdata_range, ydata_range,
-            xaxis, yaxis, pantool, zoomtool,
-            selecttool, embedtool, selectoverlay, parent,
-            plotclient=self)
-        return output
-
-    def clf(self):
-        self._plot = None
-    def clear(self):
-        self._plot = None
-    def figure(self):
-        self._plot = None
-    def plot_dates(self, *args, **kwargs):
-        kwargs['is_x_date'] = True
-        return self.plot(*args, **kwargs)
-
-    def scatter(self, *args, **kwargs):
-        kwargs['scatter'] = True
-        return self.plot(*args, **kwargs)
-
-    def plot(self, x, y=None, color=None, title=None, width=300, height=300,
-             scatter=False, is_x_date=False, is_y_date=False,
-             data_source=None, container=None):
-        if not self._hold:
-            self.figure()
-        if not self._plot:
-            self._plot =self._newxyplot(
-                title=title,
-                width=width, height=height,
-                is_x_date=is_x_date, is_y_date=is_y_date,
-                container=container
-                )
-        self._plot.plot(x, y=y, color=color,
-                        data_source=data_source,
-                        scatter=scatter
-                        )
-        return self._plot
-
-    def pandastable(self, source, sort=[], groups=[],
-                    agg='sum', width=600, offset=0, length=100,
-                    height=400, container=None):
-        if container is None:
-            parent = self.ic
-        else:
-            parent = container
-        if isinstance(source, pandas.DataFrame):
-            source = self.model('PandasDataSource', df=source)
-            source.update()
-        table = self.model('PandasPivot',
-                           pandassourceobj=source,
-                           sort=sort, groups=groups,agg=agg,
-                           offset=offset,length=length,
-                           width=width, height=height)
-        if self.bbclient:
-            self.bbclient.create(table)
-        if container is None:
-            self.show(table)
-        return PandasTable(table, self)
-
-    def table(self, data_source, columns, title=None,
-              width=600, height=300, container=None):
-        if container is None:
-            parent = self.ic
-        else:
-            parent = container
-        table = self.model(
-            'DataTable', data_source=data_source.ref(),
-            columns=columns, parent=parent.ref(),
-            width=width,
-            height=height)
-        if self.bbclient:
-            self.bbclient.update(table)
-        if container is None:
-            self.show(table)
-
-    def _add_source_to_range(self, data_source, columns, range):
-        sources = range.get('sources')
-        added = False
-        for source in sources:
-            if source['ref'] == data_source:
-                newcolumns = np.unique1d(columns, source['columns']).tolist()
-                source['columns'] = newcolumns
-                added = True
-        if not added:
-            sources.append({'ref' : data_source.ref(), 'columns' : columns})
-
-    def grid(self, plots, title=None):
-        container = self.model(
-            'GridPlotContainer',
-            parent=self.ic.ref())
-        if title is not None:
-            container.set('title', title)
-        flatplots = []
-        for row in plots:
-            for plot in row:
-                flatplots.append(plot.plotmodel)
-        for plot in flatplots:
-            plot.set('parent', container.ref())
-        plotrefs = [[x.plotmodel.ref() for x in row] for row in plots]
-        container.set('children', plotrefs)
-        if self.bbclient:
-            to_update = [self.ic, container]
-            to_update.extend(flatplots)
-            self.bbclient.upsert_all(to_update)
-        self.show(container)
-        return GridPlot(container, plots, title, self)
-
-    def show(self, plot):
-        if self.bbclient:
-            self.ic.pull()
-        children = self.ic.get('children')
-        if children is None: children = []
-        if plot.get('id') not in [x['id'] for x in children]:
-            children.insert(0, plot.ref())
-        self.ic.set('children', children)
-        if self.bbclient:
-            self.bbclient.update(self.ic)
-
-    def clearic(self):
-        self.ic.set('children', [])
-        if self.bbclient:
-            self.bbclient.update(self.ic)
-
-    def html(self, script_paths=None,
-             css_paths=None, js_snippets=[],
-             html_snippets=[], template="base.html",
-             ):
-        import jinja2
-        if script_paths is None:
-            script_paths = dump.script_paths
-        if css_paths is None:
-            css_paths=dump.css_paths
-        template = get_template(template)
-        result = template.render(
-            rawjs=dump.inline_scripts(script_paths).decode('utf8'),
-            rawcss=dump.inline_css(css_paths).decode('utf8'),
-            js_snippets=js_snippets,
-            html_snippets=html_snippets
-            )
-        return result
-
-    def make_html(self, all_models, model=None, template="base.html",
-                  script_paths=None, css_paths=None):
-        if model is None:
-            model = self.ic
-        elementid = str(uuid.uuid4())
-        plot_js = get_template('plots.js').render(
-            elementid=elementid,
-            modelid=model.id,
-            all_models=protocol.serialize_json([x.to_broadcast_json()\
-                                       for x in all_models]),
-            modeltype=model.typename,
-            )
-        plot_div = get_template('plots.html').render(
-            elementid=elementid
-            )
-        result = self.html(js_snippets=[plot_js],
-                           template=template,
-                           html_snippets=[plot_div],
-                           script_paths=script_paths,
-                           css_paths=css_paths
-                           )
-        return result
-
-    def htmldump(self, path=None):
-        """if inline, path is a filepath, otherwise,
-        path is a dir
-        """
-        html = self.make_html(self.models.values())
-        if path:
-            with open(path, "w+") as f:
-                f.write(html.encode("utf-8"))
-        else:
-            return html.encode("utf-8")
-
-
-def get_template(filename):
-    import jinja2
-    template = os.path.join(os.path.dirname(__file__),
-                            'templates',
-                            filename,
-                            )
-    with open(template) as f:
-        return jinja2.Template(f.read())
-
-bbmodel.load_special_types()
-
+    show(renderer.fig)

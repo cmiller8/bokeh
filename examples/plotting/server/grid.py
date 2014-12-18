@@ -1,37 +1,33 @@
+# The plot server must be running
+# Go to http://localhost:5006/bokeh to view this plot
+
 import numpy as np
+
 from bokeh.plotting import *
 
-def grid_example():
-    N = 80
+N = 50
 
-    x = np.linspace(0, 4*np.pi, N)
-    y = np.sin(x)
+x = np.linspace(0, 4*np.pi, N)
+y = np.sin(x)
 
+output_server("grid")
 
-    output_server("grid.py example")
-    l = line(x,y, color="#0000FF", tools="pan,zoom,resize",
-         title="line")
-    
-    N = 9
-    x2 = np.linspace(-2, 2, N)
-    y2 = x2**2
-    sizes = np.linspace(4, 10, N)
-    xpts = np.array([-.09, -.12, .0, .12, .09])
-    ypts = np.array([-.1, .02, .1, .02, -.1])
+TOOLS = "pan,wheel_zoom,box_zoom,reset,save"
 
-    aw = annular_wedge(
-        x, y, 10, 20, 0.6, 4.1, 
-        inner_radius_units="screen", outer_radius_units = "screen",
-        color="#8888ee", tools="pan,zoom,resize", title="annular_wedge",
-        name="glyphs_example")
-    bez = bezier(x, y, x+0.2, y, x+0.1, y+0.1, x-0.1, y-0.1, 
-           color="#8888ee", tools="pan,zoom,resize", title="bezier")
-    q = quad(x, x-0.5, y, y-0.5, 
-         color="#8888ee", tools="pan,zoom,resize", title="quad")
-    gridplot([[l,aw],[bez,q]])
-    return curplot()
+l = figure(title="line", tools=TOOLS)
+l.line(x,y, line_width=3, color="gold")
 
-if __name__ == "__main__":
-    grid_example()
-    # open a browser
-    show()
+aw = figure(title="annular wedge", tools=TOOLS)
+aw.annular_wedge(x, y, 10, 20, 0.6, 4.1, color="navy", alpha=0.5,
+    inner_radius_units="screen", outer_radius_units="screen")
+
+bez = figure(title="bezier", tools=TOOLS)
+bez.bezier(x, y, x+0.4, y, x+0.1, y+0.2, x-0.1, y-0.2,
+    line_width=2, color="olive")
+
+q = figure(title="quad", tools=TOOLS)
+q.quad(x, x-0.2, y, y-0.2, color="tomato", alpha=0.4)
+
+p = gridplot([[l,aw],[bez,q]])
+
+show(p)

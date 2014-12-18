@@ -2,6 +2,7 @@
 # Go to http://localhost:5006/bokeh to view this plot
 
 import numpy as np
+
 from bokeh.plotting import *
 
 N = 100
@@ -9,11 +10,20 @@ N = 100
 x = np.linspace(0, 4*np.pi, N)
 y = np.sin(x)
 
-output_server("scatter.py example")
+output_server("scatter")
 
-scatter(x,y, color="#FF00FF", tools="pan,zoom,resize")
-scatter(x,y, color="red", tools="pan,zoom,resize")
-scatter(x,y, type="square", color="green", tools="pan,zoom,resize")
-scatter(x,y, type="square", color="blue", tools="pan,zoom,resize")
+TOOLS = "pan,wheel_zoom,box_zoom,reset,save,box_select"
 
-show()
+p1 = figure(tools=TOOLS)
+p1.scatter(x,y, color="#FF00FF", nonselection_fill_color="#FFFF00", nonselection_fill_alpha=1)
+
+p2 = figure(tools=TOOLS)
+p2.scatter(x,y, color="red")
+
+p3 = figure(tools=TOOLS)
+p3.scatter(x,y, marker="square", color="green")
+
+p4 = figure(tools=TOOLS)
+p4.scatter(x,y, marker="square", color="blue")
+
+show(VBox(p1, p2, p3, p4))

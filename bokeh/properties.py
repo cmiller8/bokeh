@@ -1,22 +1,66 @@
 """ A set of descriptors that document intended types for attributes on
 classes and implement convenience behaviors like default values, etc.
 """
+from __future__ import absolute_import, print_function
 
+import re
+import types
+import difflib
+import datetime
+import dateutil.parser
+from importlib import import_module
 from copy import copy
 import inspect
-import numpy as np
 import logging
 logger = logging.getLogger(__name__)
 
-def _dummy(*args,**kw):
-    return None
+from six import integer_types, string_types, add_metaclass, iteritems
+import numpy as np
 
-class BaseProperty(object):
-    def __init__(self, default=None):
+from . import enums, colors
+from .utils import nice_join
+
+bokeh_integer_types = (np.int8, np.int16, np.int32, np.int64) + integer_types
+
+# used to indicate properties that are not set (vs null, None, etc)
+class _NotSet(object):
+    pass
+
+class DeserializationError(Exception):
+    pass
+
+class Property(object):
+    """ Base class for all type properties. """
+
+    def __init__(self, default=None, help=None):
         """ This is how the descriptor is created in the class declaration """
-        self.default = default
+        if isinstance(default, types.FunctionType): # aka. lazy value
+            self.validate(default())
+        else:
+            self.validate(default)
+
+        self._default = default
+        self.help = help
+        self.alternatives = []
+
         # This gets set by the class decorator at class creation time
         self.name = "unnamed"
+
+    def __str__(self):
+        return self.__class__.__name__
+
+    @property
+    def _name(self):
+        return "_" + self.name
+
+    @property
+    def default(self):
+        if not isinstance(self._default, types.FunctionType):
+            return copy(self._default)
+        else:
+            value = self._default()
+            self.validate(value)
+            return value
 
     @classmethod
     def autocreate(cls, name=None):
@@ -27,23 +71,69 @@ class BaseProperty(object):
         """
         return cls()
 
-    def __get__(self, obj, type=None):
-        return getattr(obj, "_"+self.name, self.default)
-
     def matches(self, new, old):
+        # XXX: originally this code warned about not being able to compare values, but that
+        # doesn't make sense, because most comparisons involving numpy arrays will fail with
+        # ValueError exception, thus warning about inevitable.
         try:
-            return new == old
+            if new is None or old is None:
+                return new is old           # XXX: silence FutureWarning from NumPy
+            else:
+                return new == old
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except Exception as e:
-            logger.warning("could not compare %s and %s for property %s",
-                           new, old, self.name)
+            logger.debug("could not compare %s and %s for property %s (Reason: %s)", new, old, self.name, e)
         return False
 
+    def from_json(self, json, models=None):
+        return json
+
+    def transform(self, value):
+        return value
+
+    def validate(self, value):
+        pass
+
+    def is_valid(self, value):
+        try:
+            self.validate(value)
+        except ValueError:
+            return False
+        else:
+            return True
+
+    def _get(self, obj):
+        if not hasattr(obj, self._name):
+            setattr(obj, self._name, self.default)
+        return getattr(obj, self._name)
+
+    def __get__(self, obj, owner=None):
+        if obj is not None:
+            return self._get(obj)
+        elif owner is not None:
+            return self
+        else:
+            raise ValueError("both 'obj' and 'owner' are None, don't know what to do")
+
     def __set__(self, obj, value):
+        try:
+            self.validate(value)
+        except ValueError as e:
+            for tp, converter in self.alternatives:
+                if tp.is_valid(value):
+                    value = converter(value)
+                    break
+            else:
+                raise e
+        else:
+            value = self.transform(value)
+
         old = self.__get__(obj)
         obj._changed_vars.add(self.name)
-        if ("_"+self.name in obj.__dict__) and self.matches(value, old):
+        if self._name in obj.__dict__ and self.matches(value, old):
             return
-        setattr(obj, "_"+self.name, value)
+        setattr(obj, self._name, value)
         obj._dirty = True
         if hasattr(obj, '_trigger'):
             if hasattr(obj, '_block_callbacks') and obj._block_callbacks:
@@ -52,25 +142,26 @@ class BaseProperty(object):
                 obj._trigger(self.name, old, value)
 
     def __delete__(self, obj):
-        if hasattr(obj, "_"+self.name):
-            delattr(obj, "_"+self.name)
+        if hasattr(obj, self._name):
+            delattr(obj, self._name)
 
+    @property
+    def has_ref(self):
+        return False
 
-class Include(BaseProperty):
+    def accepts(self, tp, converter):
+        tp = ParameterizedProperty._validate_type_param(tp)
+        self.alternatives.append((tp, converter))
+        return self
 
-    def __init__(self, delegate, prefix=None):
-        self._delegate = delegate
-        self._prefix = prefix
-        super(Include, self).__init__()
+    def __or__(self, other):
+        return Either(self, other)
 
-
-class DataSpec(BaseProperty):
+class DataSpec(Property):
     """ Because the BokehJS glyphs support a fixed value or a named
     field for most data fields, we capture that in this descriptor.
     Fields can have a fixed value, or be a name that is looked up
     on the datasource (usually as a column or record array field).
-    A default value can also be provided for when a particular row
-    in the datasource has a missing value.
     Numerical data can also have units of screen or data space.
 
     We mirror the JS convention in this Python descriptor.  For details,
@@ -91,20 +182,18 @@ class DataSpec(BaseProperty):
         f = Foo()
         f.x = "fieldname"  # Use the datasource field named "fieldname"
         f.x = 12           # A fixed value of 12
-        f.x = ("foo", 16)  # a field name, and a default value
 
     Can provide a dict with the fields explicitly named::
 
-        f.width = {"name": "foo", "default": 16}
-        f.size = {"name": "foo", "units": "screen", "default": 16}
+        f.width = {"name": "foo"}
+        f.size = {"name": "foo", "units": "screen"}
 
     Reading DataSpecs
 
 
     In the cases when the dataspec is set to just a field name or a
-    fixed value, then those are returned.  If the user has overridden
-    the default value in the DataSpec with a new default value, or
-    if no values have been set, then the value of to_dict() is returned.
+    fixed value, then those are returned.  If the no values have
+    been set, then the value of to_dict() is returned.
 
     In all cases, to determine the full dict that will be used to
     represent this dataspec, use the to_dict() method.
@@ -121,21 +210,20 @@ class DataSpec(BaseProperty):
 
     """
 
-    def __init__(self, field=None, units="data", default=None, min_value=None):
+    def __init__(self, field=None, units="data", min_value=None, default=_NotSet, help=None):
         """
         Parameters
         ==========
         **field** is the string name of a data column to look up.
         **units** is either "data" or "screen"
-        **default** is the default value to use if a datapoint is
-        missing the field specified in **name**
         """
         # Don't use .name because the HasProps metaclass uses that to
         # store the attribute name on this descriptor.
         self.field = field
         self.units = units
-        self.default = default
+        self._default = default
         self.min_value = min_value
+        self.help = help
 
     @classmethod
     def autocreate(cls, name=None):
@@ -144,16 +232,15 @@ class DataSpec(BaseProperty):
         d = cls(field=name)
         return d
 
-    def __get__(self, obj, cls=None):
+    def _get(self, obj):
         """ Try to implement a "natural" interface: if the user just set
         simple values or field names, the getter just returns those.
         However, if the user has also overridden the "units" or "default"
         settings, then a dictionary is returned.
         """
-        attrname = "_" + self.name
-        if hasattr(obj, attrname):
-            setval = getattr(obj, attrname)
-            if isinstance(setval, basestring) and self.default is None:
+        if hasattr(obj, self._name):
+            setval = getattr(obj, self._name)
+            if isinstance(setval, string_types):
                 # A string representing the field
                 return setval
             elif not isinstance(setval, dict):
@@ -162,61 +249,40 @@ class DataSpec(BaseProperty):
             else:
                 return self.to_dict(obj)
         else:
-            # If the user hasn't set anything, just return the field name
-            # if there are not defaults, or a dict with the field name
-            # and the default value.
-            if self.default is not None:
-                return {"field": self.field, "default": self.default}
-            else:
+            # If the user hasn't set anything
+            if self.field is not None:
                 return self.field
-
-    def __set__(self, obj, arg):
-        if isinstance(arg, tuple):
-            # Note: tuples of length 2 are assumed to be (field, default)
-            # other (longer) tuples might be color, e.g.
-            if len(arg) == 2:
-                field, default = arg
-                if not isinstance(field, basestring):
-                    raise RuntimeError("String is required for field name when assigning tuple to a DataSpec")
-                arg = {"field": field, "default": default}
-        super(DataSpec, self).__set__(obj, arg)
-
-    def __delete__(self, obj):
-        if hasattr(obj, self.name + "_dict"):
-            delattr(obj, self.name + "_dict")
-        super(DataSpec, self).__delete__(self, obj)
+            if self.default != _NotSet:
+                return self.default
+            # XXX: implicit `return None` or unreachable?
 
     def to_dict(self, obj):
         # Build the complete dict
-        setval = getattr(obj, "_"+self.name, None)
-        if isinstance(setval, basestring):
+        setval = getattr(obj, self._name, None)
+        if isinstance(setval, string_types):
             d = {"field": setval, "units": self.units}
-            if self.default is not None:
-                d["default"] = self.default
         elif isinstance(setval, dict):
-            d = {"units": self.units, "default": self.default}
+            d = {"units": self.units}
             d.update(setval)
-            if d["default"] is None:
-                del d["default"]
-            if "value" in d and "default" in d:
-                del d["default"]
         elif setval is not None:
             # a fixed value of some sort; no need to store the default value
             d = {"value": setval, "units": self.units}
         else:
             # If the user never set a value
-            d = {"field": self.field, "units": self.units}
-            if self.default is not None:
-                d["default"] = self.default
+            if self.field is not None:
+                d = {"field": self.field, "units": self.units}
+            elif self.default != _NotSet:
+                d = {"value": self.default, "units": self.units}
+            else:
+                d = {}
 
-        if ("value" in d) and self.min_value is not None:
+        if "value" in d and self.min_value is not None:
             if d["value"] < self.min_value:
                 raise ValueError("value must be greater than %s" % str(self.min_value))
         return d
 
     def __repr__(self):
-        return "DataSpec(field=%r, units=%r, default=%r)" % (
-            self.field, self.units, self.default)
+        return "DataSpec(field=%r, units=%r)" % (self.field, self.units)
 
 
 class ColorSpec(DataSpec):
@@ -240,20 +306,17 @@ class ColorSpec(DataSpec):
     If a 4-tuple is provided, then it is treated as an RGBa (0..255), with
     alpha as a float between 0 and 1.  (This follows the HTML5 Canvas API.)
 
-    If a 2-tuple is provided, then it is treated as (value/fieldname, default).
-    This is the same as the behavior in the base class DataSpec.
     Unlike DataSpec, ColorSpecs do not have a "units" property.
 
-    When reading out a ColorSpec, it returns a tuple, hex value, field name,
-    or a dict of (field, default).
+    When reading out a ColorSpec, it returns a tuple, hex value, or
+    field name
 
     There are two common use cases for ColorSpec: setting a constant value,
-    and indicating a field name to look for on the datasource::
+    and indicating a field name to look for on the datasource:
 
-        class Bar(HasProps):
-            col = ColorSpec("green")
-            col2 = ColorSpec("colorfield")
-            col3 = ColorSpec("colorfield", default="aqua")
+    >>> class Bar(HasProps):
+    ...     col = ColorSpec("green")
+    ...     col2 = ColorSpec("colorfield")
 
     >>> b = Bar()
     >>> b.col = "red"  # sets a fixed value of red
@@ -262,51 +325,23 @@ class ColorSpec(DataSpec):
     >>> b.col = "myfield"  # Use the datasource field named "myfield"
     >>> b.col
     "myfield"
-    >>> b.col = {"name": "mycolor", "default": "#FF126D"}
 
     For more examples, see tests/test_glyphs.py
     """
 
-    NAMEDCOLORS = set(['indigo', 'gold', 'firebrick', 'indianred', 'yellow',
-    'darkolivegreen', 'darkseagreen', 'darkslategrey', 'mediumvioletred',
-    'mediumorchid', 'chartreuse', 'mediumblue', 'black', 'springgreen',
-    'orange', 'lightsalmon', 'brown', 'turquoise', 'olivedrab', 'cyan',
-    'silver', 'skyblue', 'gray', 'darkturquoise', 'goldenrod', 'darkgreen',
-    'darkviolet', 'darkgray', 'lightpink', 'teal', 'darkmagenta',
-    'lightgoldenrodyellow', 'lavender', 'yellowgreen', 'thistle', 'violet',
-    'navy', 'dimgrey', 'orchid', 'blue', 'ghostwhite', 'honeydew',
-    'cornflowerblue', 'purple', 'darkkhaki', 'mediumpurple', 'cornsilk', 'red',
-    'bisque', 'slategray', 'darkcyan', 'khaki', 'wheat', 'deepskyblue',
-    'darkred', 'steelblue', 'aliceblue', 'lightslategrey', 'gainsboro',
-    'mediumturquoise', 'floralwhite', 'coral', 'aqua', 'burlywood',
-    'darksalmon', 'beige', 'azure', 'lightsteelblue', 'oldlace', 'greenyellow',
-    'royalblue', 'lightseagreen', 'mistyrose', 'sienna', 'lightcoral',
-    'orangered', 'navajowhite', 'lime', 'palegreen', 'lightcyan', 'seashell',
-    'mediumspringgreen', 'fuchsia', 'papayawhip', 'blanchedalmond', 'peru',
-    'aquamarine', 'white', 'darkslategray', 'ivory', 'darkgoldenrod',
-    'lawngreen', 'lightgreen', 'crimson', 'forestgreen', 'maroon', 'olive',
-    'mintcream', 'antiquewhite', 'dimgray', 'hotpink', 'moccasin', 'limegreen',
-    'saddlebrown', 'grey', 'darkslateblue', 'lightskyblue', 'deeppink',
-    'plum', 'lightgrey', 'dodgerblue', 'slateblue', 'sandybrown', 'magenta',
-    'tan', 'rosybrown', 'pink', 'lightblue', 'palevioletred', 'mediumseagreen',
-    'linen', 'darkorange', 'powderblue', 'seagreen', 'snow', 'mediumslateblue',
-    'midnightblue', 'paleturquoise', 'palegoldenrod', 'whitesmoke',
-    'darkorchid', 'salmon', 'lightslategray', 'lemonchiffon', 'chocolate',
-    'tomato', 'cadetblue', 'lightyellow', 'lavenderblush', 'darkblue',
-    'mediumaquamarine', 'green', 'blueviolet', 'peachpuff', 'darkgrey'])
+    NAMEDCOLORS = set(colors.__colors__)
 
-
-    def __init__(self, field_or_value=None, field=None, default=None, value=None):
-        """ ColorSpec(field_or_value=None, field=None, default=None, value=None)
-        """
+    def __init__(self, field_or_value=None, field=None, value=None, default=_NotSet, help=None):
         # The fancy footwork below is so we auto-interpret the first positional
         # parameter as either a field or a fixed value.  If either "field" or
         # "value" are then supplied as keyword arguments, then those will
         # override the inferred value from the positional argument.
 
         self.field = field
-        self.default = default
+        self._default = default
         self.value = value
+        self.help = help
+
         if field_or_value is not None:
             if self.isconst(field_or_value):
                 self.value = field_or_value
@@ -314,8 +349,7 @@ class ColorSpec(DataSpec):
                 self.field = field_or_value
 
         # We need to distinguish if the user ever explicitly sets the attribute; if
-        # they explicitly set it to None, we should pass on None in the dict. Otherwise,
-        # look up a default or value
+        # they explicitly set it to None, we should pass on None in the dict.
         self._isset = False
 
     @classmethod
@@ -323,7 +357,7 @@ class ColorSpec(DataSpec):
         """ Returns True if the argument is a literal color.  Check for a
         well-formed hexadecimal color value.
         """
-        return isinstance(arg, basestring) and \
+        return isinstance(arg, string_types) and \
                ((len(arg) == 7 and arg[0] == "#") or arg in cls.NAMEDCOLORS)
 
     def _formattuple(self, colortuple):
@@ -335,26 +369,20 @@ class ColorSpec(DataSpec):
         else:
             return colortuple
 
-    def __get__(self, obj, cls=None):
+    def _get(self, obj):
         # One key difference in ColorSpec.__get__ from the base class is
         # that we do not call self.to_dict() in any circumstance, because
         # this could lead to formatting color tuples as "rgb(R,G,B)" instead
         # of keeping them as tuples.
-        attrname = "_" + self.name
-        if hasattr(obj, attrname):
-            setval = getattr(obj, attrname)
+        if hasattr(obj, self._name):
+            setval = getattr(obj, self._name)
             if self.isconst(setval) or isinstance(setval, tuple):
                 # Fixed color value
                 return setval
-            elif isinstance(setval, basestring):
-                if self.default is None:
-                    # Field name
-                    return setval
-                else:
-                    return {"field": setval, "default": self.default}
+            elif isinstance(setval, string_types):
+                return setval
             elif setval is None:
                 return None
-                return {"value": None}
             else:
                 # setval should be a dict at this point
                 assert(isinstance(setval, dict))
@@ -362,27 +390,27 @@ class ColorSpec(DataSpec):
         else:
             if self.value is not None:
                 return self.value
-            elif self.default is not None:
-                return {"field": self.field, "default": self.default}
+            if self.default != _NotSet:
+                return self.default
             else:
                 return self.field
 
     def __set__(self, obj, arg):
         self._isset = True
         if isinstance(arg, tuple):
-            if len(arg) == 2:
-                if not isinstance(arg[0], basestring):
-                    raise RuntimeError("String is required for field name when assigning 2-tuple to ColorSpec")
-                arg = {"field": arg[0], "default": arg[1]}
-            elif len(arg) in (3, 4):
+            if len(arg) in (3, 4):
                 # RGB or RGBa
                 pass
             else:
                 raise RuntimeError("Invalid tuple being assigned to ColorSpec; must be length 2, 3, or 4.")
+        elif isinstance(arg, colors.Color):
+            arg = arg.to_css()
         super(ColorSpec, self).__set__(obj, arg)
 
     def to_dict(self, obj):
-        setval = getattr(obj, "_" + self.name, None)
+        setval = getattr(obj, self._name, None)
+        if self.default != _NotSet and not self._isset:
+            setval = self.default
         if setval is not None:
             if self.isconst(setval):
                 # Hexadecimal or named color
@@ -391,34 +419,35 @@ class ColorSpec(DataSpec):
                 # RGB or RGBa
                 # TODO: Should we validate that alpha is between 0..1?
                 return {"value": self._formattuple(setval)}
-            elif isinstance(setval, basestring):
-                d = {"field": setval}
-                if self.default is not None:
-                    d["default"] = self._formattuple(self.default)
-                return d
+            elif isinstance(setval, string_types):
+                return {"field": setval}
             elif isinstance(setval, dict):
                 # this is considerably simpler than the DataSpec case because
                 # there are no units involved, and we've handled all of the
                 # value cases above.
-                d = setval.copy()
-                if isinstance(d.get("default", None), tuple):
-                    d["default"] = self._formattuple(d["default"])
-                return d
+                return setval.copy()
         else:
             if self._isset:
-                return {"value": None}
-            # If the user never set a value
-            if self.value is not None:
-                return {"value": self.value}
+                if self.value is None:
+                    return {"value": None}
+                else:
+                    return {"value": getattr(obj, self._name, self.value)}
             else:
-                d = {"field": self.field}
-                if self.default is not None:
-                    d["default"] = self._formattuple(self.default)
-                return d
+                if self.value:
+                    return {"value": self.value}
+                return {"field": self.field}
 
     def __repr__(self):
-        return "ColorSpec(field=%r, default=%r)" % (self.field, self.default)
+        return "ColorSpec(field=%r)" % self.field
 
+class Include(object):
+    ''' Include other properties from mixin Models, with a given prefix. '''
+
+    def __init__(self, delegate):
+        if not (isinstance(delegate, type) and issubclass(delegate, HasProps)):
+            raise ValueError("expected a subclass of HasProps, got %r" % delegate)
+
+        self.delegate = delegate
 
 class MetaHasProps(type):
     def __new__(cls, class_name, bases, class_dict):
@@ -429,22 +458,17 @@ class MetaHasProps(type):
         # First pre-process to handle all the Includes
         includes = {}
         removes = set()
-        for name, prop in class_dict.iteritems():
+        for name, prop in class_dict.items():
             if not isinstance(prop, Include):
                 continue
 
-            delegate = prop._delegate
-            if not (isinstance(delegate,type) and issubclass(delegate,HasProps)):
-                continue
+            delegate = prop.delegate
+            prefix = re.sub("_props$", "", name) + "_"
 
-            if prop._prefix is None:
-                prefix = name + "_"
-            else:
-                prefix = prop._prefix + "_"
             for subpropname in delegate.class_properties(withbases=False):
                 fullpropname = prefix + subpropname
-                subprop = lookup_descriptor(delegate, subpropname)
-                if isinstance(subprop, BaseProperty):
+                subprop = delegate.lookup(subpropname)
+                if isinstance(subprop, Property):
                     # If it's an actual instance, then we need to make a copy
                     # so two properties don't write to the same hidden variable
                     # inside the instance.
@@ -455,27 +479,27 @@ class MetaHasProps(type):
 
         # Update the class dictionary, taking care not to overwrite values
         # from the delegates that the subclass may have explicitly defined
-        for key, val in includes.iteritems():
+        for key, val in includes.items():
             if key not in class_dict:
                 class_dict[key] = val
         for tmp in removes:
             del class_dict[tmp]
 
         dataspecs = {}
-        for name, prop in class_dict.iteritems():
-            if isinstance(prop, BaseProperty):
+        for name, prop in class_dict.items():
+            if isinstance(prop, Property):
                 prop.name = name
-                if hasattr(prop, 'has_ref') and prop.has_ref:
+                if prop.has_ref:
                     names_with_refs.add(name)
-                elif isinstance(prop, ContainerProp):
+                elif isinstance(prop, ContainerProperty):
                     container_names.add(name)
                 names.add(name)
                 if isinstance(prop, DataSpec):
                     dataspecs[name] = prop
 
-            elif isinstance(prop, type) and issubclass(prop, BaseProperty):
+            elif isinstance(prop, type) and issubclass(prop, Property):
                 # Support the user adding a property without using parens,
-                # i.e. using just the BaseProperty subclass instead of an
+                # i.e. using just the Property subclass instead of an
                 # instance of the subclass
                 newprop = prop.autocreate(name=name)
                 class_dict[name] = newprop
@@ -500,40 +524,39 @@ def accumulate_from_subclasses(cls, propname):
             s.update(getattr(c, propname))
     return s
 
-def lookup_descriptor(cls, propname):
-    for c in inspect.getmro(cls):
-        if issubclass(c, HasProps) and propname in c.__dict__:
-            return c.__dict__[propname]
-    raise KeyError("Property '%s' not found on class '%s'" % (propname, cls))
-
+@add_metaclass(MetaHasProps)
 class HasProps(object):
-    __metaclass__ = MetaHasProps
 
-    def __init__(self, *args, **kwargs):
-        """ Set up a default initializer handler which assigns all kwargs
-        that have the same names as Properties on the class
-        """
-        # Initialize the mutated property handling
+    def __init__(self, **properties):
+        super(HasProps, self).__init__()
         self._changed_vars = set()
 
-        newkwargs = {}
-        props = self.properties()
-        for kw, val in kwargs.iteritems():
-            if kw in props:
-                setattr(self, kw, val)
-            else:
-                newkwargs[kw] = val
-        # Dump the rest of the kwargs in self.dict
-        self.__dict__.update(newkwargs)
-        self._changed_vars.update(newkwargs.keys())
-        super(HasProps, self).__init__(*args)
+        for name, value in properties.items():
+            setattr(self, name, value)
+
+    def __setattr__(self, name, value):
+        props = sorted(self.properties())
+
+        if name.startswith("_") or name in props:
+            super(HasProps, self).__setattr__(name, value)
+        else:
+            matches, text = difflib.get_close_matches(name.lower(), props), "similar"
+
+            if not matches:
+                matches, text = props, "possible"
+
+            raise AttributeError("unexpected attribute '%s' to %s, %s attributes are %s" %
+                (name, self.__class__.__name__, text, nice_join(matches)))
 
     def clone(self):
         """ Returns a duplicate of this object with all its properties
         set appropriately.  Values which are containers are shallow-copied.
         """
-        d = dict((p,getattr(self, p)) for p in self.properties())
-        return self.__class__(**d)
+        return self.__class__(**self.changed_properties_with_values())
+
+    @classmethod
+    def lookup(cls, name):
+        return getattr(cls, name)
 
     @classmethod
     def properties_with_refs(cls):
@@ -542,8 +565,7 @@ class HasProps(object):
         pull together the full list of properties.
         """
         if not hasattr(cls, "__cached_allprops_with_refs"):
-            s = accumulate_from_subclasses(cls,
-                                           "__properties_with_refs__")
+            s = accumulate_from_subclasses(cls, "__properties_with_refs__")
             cls.__cached_allprops_with_refs = s
         return cls.__cached_allprops_with_refs
 
@@ -552,8 +574,7 @@ class HasProps(object):
         """ Returns a list of properties that are containers
         """
         if not hasattr(cls, "__cached_allprops_containers"):
-            s = accumulate_from_subclasses(cls,
-                                           "__container_props__")
+            s = accumulate_from_subclasses(cls, "__container_props__")
             cls.__cached_allprops_containers = s
         return cls.__cached_allprops_containers
 
@@ -599,6 +620,15 @@ class HasProps(object):
     def reset_changed_vars(self):
         self._changed_vars = set()
 
+    def properties_with_values(self):
+        return dict([ (attr, getattr(self, attr)) for attr in self.properties() ])
+
+    def changed_properties(self):
+        return self.changed_vars()
+
+    def changed_properties_with_values(self):
+        return dict([ (attr, getattr(self, attr)) for attr in self.changed_properties() ])
+
     @classmethod
     def class_properties(cls, withbases=True):
         if withbases:
@@ -613,215 +643,541 @@ class HasProps(object):
 
     def pprint_props(self, indent=0):
         """ Prints the properties of this object, nicely formatted """
-        for p in self.__properties__:
-            print "  "*indent + p + ":", getattr(self, p)
+        for key, value in self.properties_with_values().items():
+            print("%s%s: %r" % ("  "*indent, key, value))
 
-# Python scalar types
-class Int(BaseProperty): pass
-class Float(BaseProperty): pass
-class Complex(BaseProperty): pass
-class File(BaseProperty): pass
-class Bool(BaseProperty): pass
-class String(BaseProperty): pass
+class PrimitiveProperty(Property):
 
-class ContainerProp(BaseProperty):
+    _underlying_type = None
+
+    def validate(self, value):
+        super(PrimitiveProperty, self).validate(value)
+
+        if not (value is None or isinstance(value, self._underlying_type)):
+            raise ValueError("expected a value of type %s, got %s of type %s" %
+                (nice_join([ cls.__name__ for cls in self._underlying_type ]), value, type(value).__name__))
+
+    def from_json(self, json, models=None):
+        if json is None or isinstance(json, self._underlying_type):
+            return json
+        else:
+            expected = nice_join([ cls.__name__ for cls in self._underlying_type ])
+            raise DeserializationError("%s expected %s, got %s" % (self, expected, json))
+
+class Bool(PrimitiveProperty):
+    ''' Boolean type property. '''
+    _underlying_type = (bool,)
+
+class Int(PrimitiveProperty):
+    ''' Signed integer type property. '''
+    _underlying_type = bokeh_integer_types
+
+class Float(PrimitiveProperty):
+    ''' Floating point type property. '''
+    _underlying_type = (float, ) + bokeh_integer_types
+
+class Complex(PrimitiveProperty):
+    ''' Complex floating point type property. '''
+    _underlying_type = (complex, float) + bokeh_integer_types
+
+class String(PrimitiveProperty):
+    ''' String type property. '''
+    _underlying_type = string_types
+
+class Regex(String):
+    ''' Regex type property validates that text values match the
+    given regular expression.
+    '''
+    def __init__(self, regex, default=None, help=None):
+        self.regex = re.compile(regex)
+        super(Regex, self).__init__(default=default, help=help)
+
+    def validate(self, value):
+        super(Regex, self).validate(value)
+
+        if not (value is None or self.regex.match(value) is not None):
+            raise ValueError("expected a string matching %r pattern, got %r" % (self.regex.pattern, value))
+
+    def __str__(self):
+        return "%s(%r)" % (self.__class__.__name__, self.regex.pattern)
+
+class ParameterizedProperty(Property):
+    """ Base class for Properties that have type parameters, e.g. `List(String)`. """
+
+    @staticmethod
+    def _validate_type_param(type_param):
+        if isinstance(type_param, type):
+            if issubclass(type_param, Property):
+                return type_param()
+            else:
+                type_param = type_param.__name__
+        elif isinstance(type_param, Property):
+            return type_param
+
+        raise ValueError("expected a property as type parameter, got %s" % type_param)
+
+    @property
+    def type_params(self):
+        raise NotImplementedError("abstract method")
+
+    @property
+    def has_ref(self):
+        return any(type_param.has_ref for type_param in self.type_params)
+
+class ContainerProperty(ParameterizedProperty):
+    ''' Base class for Container-like type properties. '''
     # Base class for container-like things; this helps the auto-serialization
     # and attribute change detection code
     pass
 
-# container types
-class List(ContainerProp):
+class List(ContainerProperty):
     """ If a default value is passed in, then a shallow copy of it will be
     used for each new use of this property.
 
     People will also frequently pass in some other kind of property or a
     class (to indicate a list of instances).  In those cases, we want to
     just create an empty list
-
-    has_ref parameter tells us whether the json representation of this
-    list contains references to other objects
     """
 
-    def __init__(self, default=None, has_ref=False):
-        if isinstance(default, type) or isinstance(default, BaseProperty):
-            default = None
-        self.has_ref = has_ref
-        BaseProperty.__init__(self, default)
+    def __init__(self, item_type, default=[], help=None):
+        self.item_type = self._validate_type_param(item_type)
+        super(List, self).__init__(default=default, help=help)
 
-    def __get__(self, obj, type=None):
-        if hasattr(obj, "_"+self.name):
-            return getattr(obj, "_"+self.name)
-        if self.default is None:
-            val = []
-        elif isinstance(self.default, list):
-            val = copy(self.default)
+    @property
+    def type_params(self):
+        return [self.item_type]
+
+    def validate(self, value):
+        super(List, self).validate(value)
+
+        if value is not None:
+            if not (isinstance(value, list) and \
+                    all(self.item_type.is_valid(item) for item in value)):
+                raise ValueError("expected an element of %s, got %r" % (self, value))
+
+    def __str__(self):
+        return "%s(%s)" % (self.__class__.__name__, self.item_type)
+
+    def from_json(self, json, models=None):
+        if json is None:
+            return None
+        elif isinstance(json, list):
+            return [ self.item_type.from_json(item, models) for item in json ]
         else:
-            val = self.default
-        setattr(obj, "_"+self.name, val)
-        return val
+            raise DeserializationError("%s expected a list or None, got %s" % (self, json))
 
-class Dict(ContainerProp):
+class Dict(ContainerProperty):
     """ If a default value is passed in, then a shallow copy of it will be
     used for each new use of this property.
-
-    has_ref parameter tells us whether the json representation of this
-    list contains references to other objects
     """
 
-    def __init__(self, default={}, has_ref=False):
-        BaseProperty.__init__(self, default)
-        self.has_ref = has_ref
+    def __init__(self, keys_type, values_type, default={}, help=None):
+        self.keys_type = self._validate_type_param(keys_type)
+        self.values_type = self._validate_type_param(values_type)
+        super(Dict, self).__init__(default=default, help=help)
 
-    def __get__(self, obj, type=None):
-        if not hasattr(obj, "_"+self.name) and isinstance(self.default, dict):
-            setattr(obj, "_"+self.name, copy(self.default))
-            return getattr(obj, "_"+self.name)
+    @property
+    def type_params(self):
+        return [self.keys_type, self.values_type]
+
+    def validate(self, value):
+        super(Dict, self).validate(value)
+
+        if value is not None:
+            if not (isinstance(value, dict) and \
+                    all(self.keys_type.is_valid(key) and self.values_type.is_valid(val) for key, val in iteritems(value))):
+                raise ValueError("expected an element of %s, got %r" % (self, value))
+
+    def __str__(self):
+        return "%s(%s, %s)" % (self.__class__.__name__, self.keys_type, self.values_type)
+
+    def from_json(self, json, models=None):
+        if json is None:
+            return None
+        elif isinstance(json, dict):
+            return { self.keys_type.from_json(key, models): self.values_type.from_json(value, models) for key, value in iteritems(json) }
         else:
-            return getattr(obj, "_"+self.name, self.default)
+            raise DeserializationError("%s expected a dict or None, got %s" % (self, json))
 
-class Tuple(ContainerProp):
+class Tuple(ContainerProperty):
+    ''' Tuple type property. '''
+    def __init__(self, tp1, tp2, *type_params, **kwargs):
+        self._type_params = list(map(self._validate_type_param, (tp1, tp2) + type_params))
+        super(Tuple, self).__init__(default=kwargs.get("default"), help=kwargs.get("help"))
 
-    def __init__(self, default=()):
-        BaseProperty.__init__(self, default)
+    @property
+    def type_params(self):
+        return self._type_params
 
-class Array(ContainerProp):
+    def validate(self, value):
+        super(Tuple, self).validate(value)
+
+        if value is not None:
+            if not (isinstance(value, (tuple, list)) and len(self.type_params) == len(value) and \
+                    all(type_param.is_valid(item) for type_param, item in zip(self.type_params, value))):
+                raise ValueError("expected an element of %s, got %r" % (self, value))
+
+    def __str__(self):
+        return "%s(%s)" % (self.__class__.__name__, ", ".join(map(str, self.type_params)))
+
+    def from_json(self, json, models=None):
+        if json is None:
+            return None
+        elif isinstance(json, list):
+            return tuple(type_param.from_json(item, models) for type_param, item in zip(self.type_params, json))
+        else:
+            raise DeserializationError("%s expected a list or None, got %s" % (self, json))
+
+class Array(ContainerProperty):
     """ Whatever object is passed in as a default value, np.asarray() is
     called on it to create a copy for the default value for each use of
     this property.
     """
-    def __get__(self, obj, type=None):
-        if not hasattr(obj, "_"+self.name) and self.default is not None:
-            setattr(obj, "_"+self.name, np.asarray(self.default))
-            return getattr(obj, "_"+self.name)
+
+    def __init__(self, item_type, default=None, help=None):
+        self.item_type = self._validate_type_param(item_type)
+        super(Array, self).__init__(default=default, help=help)
+
+    @property
+    def type_params(self):
+        return [self.item_type]
+
+    def validate(self, value):
+        super(Array, self).validate(value)
+        # TODO: implement validation of np.array, etc.
+
+class Instance(Property):
+    ''' Instance type property for referneces to other Models in the object
+    graph.
+
+    '''
+    def __init__(self, instance_type, default=None, help=None):
+        if not isinstance(instance_type, (type,) + string_types):
+            raise ValueError("expected a type or string, got %s" % instance_type)
+
+        if isinstance(instance_type, type) and not issubclass(instance_type, HasProps):
+            raise ValueError("expected a subclass of HasProps, got %s" % instance_type)
+
+        self._instance_type = instance_type
+
+        super(Instance, self).__init__(default=default, help=help)
+
+    @property
+    def instance_type(self):
+        if isinstance(self._instance_type, str):
+            module, name = self._instance_type.rsplit(".", 1)
+            self._instance_type = getattr(import_module(module, "bokeh"), name)
+
+        return self._instance_type
+
+    @property
+    def has_ref(self):
+        return True
+
+    def validate(self, value):
+        super(Instance, self).validate(value)
+
+        if value is not None:
+            if not isinstance(value, self.instance_type):
+                raise ValueError("expected an instance of type %s, got %s of type %s" %
+                    (self.instance_type.__name__, value, type(value).__name__))
+
+    def __str__(self):
+        return "%s(%s)" % (self.__class__.__name__, self.instance_type.__name__)
+
+    def from_json(self, json, models=None):
+        if json is None:
+            return None
+        elif isinstance(json, dict):
+            from .plot_object import PlotObject
+            if issubclass(self.instance_type, PlotObject):
+                if models is None:
+                    raise DeserializationError("%s can't deserialize without models" % self)
+                else:
+                    model = models.get(json["id"])
+
+                    if model is not None:
+                        return model
+                    else:
+                        raise DeserializationError("%s failed to deserilize reference to %s" % (self, json))
+            else:
+                attrs = {}
+
+                for name, value in iteritems(json):
+                    prop = self.instance_type.lookup(name)
+                    attrs[name] = prop.from_json(value, models)
+
+                # XXX: this doesn't work when Instance(Superclass) := Subclass()
+                # Serialization dict must carry type information to resolve this.
+                return self.instance_type(**attrs)
         else:
-            return getattr(obj, "_"+self.name, self.default)
+            raise DeserializationError("%s expected a dict or None, got %s" % (self, json))
 
-# OOP things
-class Class(BaseProperty): pass
-class Instance(BaseProperty):
-    def __init__(self, default=None, has_ref=False):
-        """has_ref : whether the json for this is a reference to
-        another object or not
-        """
-        super(Instance, self).__init__(default=default)
-        self.has_ref = has_ref
-
-    def __get__(self, obj, type=None):
-        # If the constructor for Instance() supplied a class name, we should
-        # instantiate that class here, instead of returning the class as the
-        # default object
-        if not hasattr(obj, "_"+self.name):
-             if type and self.default and isinstance(self.default, type):
-                setattr(obj, "_"+self.name, self.default())
-        return getattr(obj, "_"+self.name, None)
-
-class This(BaseProperty):
-    """ A reference to an instance of the class being defined
-    """
+class This(Property):
+    """ A reference to an instance of the class being defined. """
     pass
 
 # Fake types, ABCs
-class Any(BaseProperty): pass
-class Function(BaseProperty): pass
-class Event(BaseProperty): pass
+class Any(Property):
+    ''' Any type property accepts any values. '''
+    pass
 
-class Either(BaseProperty):
-    """ Takes a list of valid properties and validates against them in
-    succession.
-    """
-    # TODO: In order to implement this, we need to change all the properties
-    # to use a .validate() method so they can be called programmatically from
-    # this handler
-    def __init__(self, *props, **kwargs):
-        self._props = props
-        self.default = kwargs.get("default", None)
+class Function(Property):
+    ''' Function type property. '''
+    pass
 
+class Event(Property):
+    ''' Event type property. '''
+    pass
 
-class Enum(BaseProperty):
+class Range(ParameterizedProperty):
+    ''' Range type property ensures values are between a range. '''
+    def __init__(self, range_type, start, end, default=None, help=None):
+        self.range_type = self._validate_type_param(range_type)
+        self.range_type.validate(start)
+        self.range_type.validate(end)
+        self.start = start
+        self.end = end
+        super(Range, self).__init__(default=default, help=help)
+
+    @property
+    def type_params(self):
+        return [self.range_type]
+
+    def validate(self, value):
+        super(Range, self).validate(value)
+
+        if not (value is None or self.range_type.is_valid(value) and value >= self.start and value <= self.end):
+            raise ValueError("expected a value of type %s in range [%s, %s], got %r" % (self.range_type, self.start, self.end, value))
+
+    def __str__(self):
+        return "%s(%s, %r, %r)" % (self.__class__.__name__, self.range_type, self.start, self.end)
+
+class Byte(Range):
+    ''' Byte type property. '''
+    def __init__(self, default=0, help=None):
+        super(Byte, self).__init__(Int, 0, 255, default=default, help=help)
+
+class Either(ParameterizedProperty):
+    """ Takes a list of valid properties and validates against them in succession. """
+
+    def __init__(self, tp1, tp2, *type_params, **kwargs):
+        self._type_params = list(map(self._validate_type_param, (tp1, tp2) + type_params))
+        default = kwargs.get("default", self._type_params[0].default)
+        help = kwargs.get("help")
+        super(Either, self).__init__(default=default, help=help)
+
+    @property
+    def type_params(self):
+        return self._type_params
+
+    def validate(self, value):
+        super(Either, self).validate(value)
+
+        if not (value is None or any(param.is_valid(value) for param in self.type_params)):
+            raise ValueError("expected an element of either %s, got %r" % (nice_join(self.type_params), value))
+
+    def transform(self, value):
+        for param in self.type_params:
+            try:
+                return param.transform(value)
+            except ValueError:
+                pass
+
+        raise ValueError("Could not transform %r" % value)
+
+    def from_json(self, json, models=None):
+        for tp in self.type_params:
+            try:
+                return tp.from_json(json, models)
+            except DeserializationError:
+                pass
+        else:
+            raise DeserializationError("%s couldn't deserialize %s" % (self, json))
+
+    def __str__(self):
+        return "%s(%s)" % (self.__class__.__name__, ", ".join(map(str, self.type_params)))
+
+    def __or__(self, other):
+        return self.__class__(*(self.type_params + [other]), default=self._default, help=self.help)
+
+class Enum(Property):
     """ An Enum with a list of allowed values. The first value in the list is
     the default value, unless a default is provided with the "default" keyword
     argument.
     """
-    def __init__(self, *values, **kwargs):
-        if "default" not in kwargs:
-            if len(values) > 0:
-                default = values[0]
-            else:
-                default = None
-        else:
-            default = kwargs.pop("default")
-        self.default = default
-        self.allowed_values = values
+    def __init__(self, enum, *values, **kwargs):
+        if not (not values and isinstance(enum, enums.Enumeration)):
+            enum = enums.enumeration(enum, *values)
 
-    def __set__(self, obj, value):
-        if value not in self.allowed_values:
-            raise ValueError("Invalid value '%r' passed to Enum." % value)
-        super(Enum, self).__set__(obj, value)
+        self.allowed_values = enum._values
 
+        default = kwargs.get("default", enum._default)
+        help = kwargs.get("help")
+        super(Enum, self).__init__(default=default, help=help)
 
-Sequence = _dummy
-Mapping = _dummy
-Iterable = _dummy
+    def validate(self, value):
+        super(Enum, self).validate(value)
+
+        if not (value is None or value in self.allowed_values):
+            raise ValueError("invalid value for %s: %r; allowed values are %s" % (self.name, value, nice_join(self.allowed_values)))
+
+    def __str__(self):
+        return "%s(%s)" % (self.__class__.__name__, ", ".join(map(repr, self.allowed_values)))
+
+class Auto(Enum):
+
+    def __init__(self):
+        super(Auto, self).__init__("auto")
+
+    def __str__(self):
+        return self.__class__.__name__
 
 # Properties useful for defining visual attributes
-class Color(BaseProperty):
+class Color(Either):
     """ Accepts color definition in a variety of ways, and produces an
-    appropriate serialization of its value for whatever backend
+    appropriate serialization of its value for whatever backend.
+
+    For colors, because we support named colors and hex values prefaced
+    with a "#", when we are handed a string value, there is a little
+    interpretation: if the value is one of the 147 SVG named colors or
+    it starts with a "#", then it is interpreted as a value.
+
+    If a 3-tuple is provided, then it is treated as an RGB (0..255).
+    If a 4-tuple is provided, then it is treated as an RGBa (0..255), with
+    alpha as a float between 0 and 1.  (This follows the HTML5 Canvas API.)
     """
-    # TODO: Implement this.  Valid inputs: SVG named 147, 3-tuple, 4-tuple with
-    # appropriate options for baking in alpha, hex code.  Tuples should allow
-    # both float as well as integer.
 
+    def __init__(self, default=None, help=None):
+        types = (Enum(enums.NamedColor),
+                 Regex("^#[0-9a-fA-F]{6}$"),
+                 Tuple(Byte, Byte, Byte),
+                 Tuple(Byte, Byte, Byte, Percent))
+        super(Color, self).__init__(*types, default=default, help=help)
 
-class Align(BaseProperty): pass
+    def __str__(self):
+        return self.__class__.__name__
 
-class Pattern(BaseProperty):
-    def __init__(self, default=[]):
-        BaseProperty.__init__(self, default)
+class Align(Property):
+    pass
 
-    def __set__(self, obj, arg):
-        if isinstance(arg, str):
+class DashPattern(Either):
+    """
+    This is a property that expresses line dashes.  It can be specified in
+    a variety of forms:
+
+    * "solid", "dashed", "dotted", "dotdash", "dashdot"
+    * A tuple or list of integers in the HTML5 Canvas dash specification
+      style: http://www.w3.org/html/wg/drafts/2dcontext/html5_canvas/#dash-list
+      Note that if the list of integers has an odd number of elements, then
+      it is duplicated, and that duplicated list becomes the new dash list.
+
+    If dash is turned off, then the dash pattern is the empty list [].
+    """
+
+    _dash_patterns = {
+        "solid": [],
+        "dashed": [6],
+        "dotted": [2,4],
+        "dotdash": [2,4,6,4],
+        "dashdot": [6,4,2,4],
+    }
+
+    def __init__(self, default=[], help=None):
+        types = Enum(enums.DashPattern), Regex(r"^(\d+(\s+\d+)*)?$"), List(Int)
+        super(DashPattern, self).__init__(*types, default=default, help=help)
+
+    def transform(self, value):
+        value = super(DashPattern, self).transform(value)
+
+        if isinstance(value, string_types):
             try:
-                arg = [float(x) for x in arg.split()]
-            except TypeError:
-                raise RuntimeError("Invalid string being assigned to Pattern; must be space delimited numbers, e.g. '2 4 3 2'")
-        super(Pattern, self).__set__(obj, arg)
+                return self._dash_patterns[value]
+            except KeyError:
+                return [int(x) for x in  value.split()]
+        else:
+            return value
+
+    def __str__(self):
+        return self.__class__.__name__
 
 class Size(Float):
     """ Equivalent to an unsigned int """
+    def validate(self, value):
+        super(Size, self).validate(value)
 
-class Angle(Float): pass
+        if not (value is None or 0.0 <= value):
+            raise ValueError("expected a non-negative number, got %r" % value)
 
 class Percent(Float):
     """ Percent is useful for alphas and coverage and extents; more
     semantically meaningful than Float(0..1)
     """
+    def validate(self, value):
+        super(Percent, self).validate(value)
 
-# These classes can be mixed-in to HasProps classes to get them the
-# corresponding attributes
-class FillProps(HasProps):
-    """ Mirrors the BokehJS properties.fill_properties class """
-    fill_color = ColorSpec("gray")
-    fill_alpha = Percent(1.0)
+        if not (value is None or 0.0 <= value <= 1.0):
+            raise ValueError("expected a value in range [0, 1], got %r" % value)
 
-class LineProps(HasProps):
-    """ Mirrors the BokehJS properties.line_properties class """
-    line_color = ColorSpec("black")
-    line_width = Size(1)
-    line_alpha = Percent(1.0)
-    line_join = String("miter")
-    line_cap = String("butt")
-    line_dash = Pattern
-    line_dash_offset = Int(0)
+class Angle(Float):
+    ''' Angle type property. '''
+    pass
 
-class TextProps(HasProps):
-    """ Mirrors the BokehJS properties.text_properties class """
-    text_font = String
-    text_font_size = String("10pt")
-    text_font_style = Enum("normal", "italic", "bold")
-    text_color = Color("black")
-    text_alpha = Percent(1.0)
-    text_align = Enum("left", "right", "center")
-    text_baseline = Enum("top", "middle", "bottom")
+class Date(Property):
+    ''' Date (not datetime) type property. '''
+    def __init__(self, default=datetime.date.today(), help=None):
+        super(Date, self).__init__(default=default, help=help)
+
+    def validate(self, value):
+        super(Date, self).validate(value)
+
+        if not (value is None or isinstance(value, (datetime.date,) + string_types + (float,) + bokeh_integer_types)):
+            raise ValueError("expected a date, string or timestamp, got %r" % value)
+
+    def transform(self, value):
+        value = super(Date, self).transform(value)
+
+        if isinstance(value, (float,) + bokeh_integer_types):
+            try:
+                value = datetime.date.fromtimestamp(value)
+            except ValueError:
+                value = datetime.date.fromtimestamp(value/1000)
+        elif isinstance(value, string_types):
+            value = dateutil.parser.parse(value).date()
+
+        return value
+
+class Datetime(Property):
+    ''' Datetime type property. '''
+    def __init__(self, default=datetime.date.today(), help=None):
+        super(Datetime, self).__init__(default=default, help=help)
+
+    def validate(self, value):
+        super(Datetime, self).validate(value)
+
+        if (isinstance(value, (datetime.datetime, datetime.date, np.datetime64))):
+            return
+        try:
+            import pandas
+            if isinstance(value, (pandas.Timestamp)):
+                return
+        except ImportError:
+            pass
+
+        raise ValueError("Expected a datetime instance, got %r" % value)
+
+    def transform(self, value):
+        value = super(Datetime, self).transform(value)
+        return value
+        # Handled by serialization in protocol.py for now
 
 
+class RelativeDelta(Dict):
+    ''' RelativeDelta type property for time deltas. '''
+    def __init__(self, default={}, help=None):
+        keys = Enum("years", "months", "days", "hours", "minutes", "seconds", "microseconds")
+        values = Int
+        super(RelativeDelta, self).__init__(keys, values, default=default, help=help)
+
+    def __str__(self):
+        return self.__class__.__name__

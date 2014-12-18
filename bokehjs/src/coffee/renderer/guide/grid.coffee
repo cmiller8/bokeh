@@ -1,41 +1,39 @@
 
 define [
   "underscore",
-  "common/safebind",
   "common/has_parent",
-  "common/ticking",
+  "common/collection",
   "renderer/properties",
   "common/plot_widget",
-], (_, safebind, HasParent, ticking, Properties, PlotWidget) ->
-
-  line_properties = Properties.line_properties
+], (_, HasParent, Collection, properties, PlotWidget) ->
 
   class GridView extends PlotWidget
     initialize: (attrs, options) ->
       super(attrs, options)
-
-      @grid_props = new line_properties(@, null, 'grid_')
+      @grid_props = new properties.Line(@, 'grid_')
+      @x_range_name = @mget('x_range_name')
+      @y_range_name = @mget('y_range_name')
 
     render: () ->
-      ctx = @plot_view.ctx
+      ctx = @plot_view.canvas_view.ctx
 
       ctx.save()
       @_draw_grids(ctx)
       ctx.restore()
 
     bind_bokeh_events: () ->
-      safebind(this, @model, 'change', @request_render)
+      @listenTo(@model, 'change', @request_render)
 
     _draw_grids: (ctx) ->
       if not @grid_props.do_stroke
         return
       [xs, ys] = @mget('grid_coords')
       @grid_props.set(ctx, @)
-      for i in [0..xs.length-1]
-        [sx, sy] = @plot_view.map_to_screen(xs[i], "data", ys[i], "data")
+      for i in [0...xs.length]
+        [sx, sy] = @plot_view.map_to_screen(xs[i], "data", ys[i], "data", @x_range_name, @y_range_name)
         ctx.beginPath()
         ctx.moveTo(Math.round(sx[0]), Math.round(sy[0]))
-        for i in [1..sx.length-1]
+        for i in [1...sx.length]
           ctx.lineTo(Math.round(sx[i]), Math.round(sy[i]))
         ctx.stroke()
       return
@@ -51,16 +49,25 @@ define [
       @add_dependencies('computed_bounds', this, ['bounds'])
 
       @register_property('grid_coords', @_grid_coords, false)
-      @add_dependencies('grid_coords', this, ['computed_bounds', 'dimension'])
+      @add_dependencies('grid_coords', this, ['computed_bounds', 'dimension', 'ticker'])
 
-     _bounds: () ->
+      @register_property('ranges', @_ranges, true)
+
+    _ranges: () ->
       i = @get('dimension')
       j = (i + 1) % 2
+      frame = @get('plot').get('frame')
+      ranges = [
+        frame.get('x_ranges')[@get('x_range_name')],
+        frame.get('y_ranges')[@get('y_range_name')]
+      ]
+      return [ranges[i], ranges[j]]
 
-      ranges = [@get_obj('plot').get_obj('x_range'), @get_obj('plot').get_obj('y_range')]
+     _bounds: () ->
+      [range, cross_range] = @get('ranges')
 
       user_bounds = @get('bounds') ? 'auto'
-      range_bounds = [ranges[i].get('min'), ranges[i].get('max')]
+      range_bounds = [range.get('min'), range.get('max')]
 
       if _.isArray(user_bounds)
         start = Math.min(user_bounds[0], user_bounds[1])
@@ -81,9 +88,7 @@ define [
     _grid_coords: () ->
       i = @get('dimension')
       j = (i + 1) % 2
-      ranges = [@get_obj('plot').get_obj('x_range'), @get_obj('plot').get_obj('y_range')]
-      range = ranges[i]
-      cross_range = ranges[j]
+      [range, cross_range] = @get('ranges')
 
       [start, end] = @get('computed_bounds')
 
@@ -91,8 +96,7 @@ define [
       end = Math.max(start, end)
       start = tmp
 
-      interval = ticking.auto_interval(start, end)
-      ticks = ticking.auto_ticks(null, null, start, end, interval)
+      ticks = @get('ticker').get_ticks(start, end, range, {}).major
 
       min = range.get('min')
       max = range.get('max')
@@ -101,13 +105,13 @@ define [
       cmax = cross_range.get('max')
 
       coords = [[], []]
-      for ii in [0..ticks.length-1]
+      for ii in [0...ticks.length]
         if ticks[ii] == min or ticks[ii] == max
           continue
         dim_i = []
         dim_j = []
         N = 2
-        for n in [0..N-1]
+        for n in [0...N]
           loc = cmin + (cmax-cmin)/(N-1) * n
           dim_i.push(ticks[ii])
           dim_j.push(loc)
@@ -116,8 +120,14 @@ define [
 
       return coords
 
-    display_defaults: () ->
-      return {
+    defaults: ->
+      return _.extend {}, super(), {
+        x_range_name: "default"
+        y_range_name: "default"
+      }
+
+    display_defaults: ->
+      return _.extend {}, super(), {
         level: 'underlay'
         grid_line_color: '#cccccc'
         grid_line_width: 1
@@ -128,7 +138,7 @@ define [
         grid_line_dash_offset: 0
       }
 
-  class Grids extends Backbone.Collection
+  class Grids extends Collection
      model: Grid
 
   return {

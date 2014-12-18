@@ -87,6 +87,7 @@ wedge = {
   x: 'wx'
   y: 'wy'
   radius: 'rs'
+  radius_units: 'screen'
   start_angle: 'starts'
   end_angle: 'ends'
   line_color: 'white'
@@ -98,11 +99,11 @@ options = {
   dims: [1200, 600]
   xrange: [-130, -60]
   yrange: [25, 50]
-  xaxes: false
-  yaxes: false
+  xaxes: "below"
+  yaxes: "left"
   xgrid: false
   ygrid: false
-  tools: "pan,zoom,resize,preview"
+  tools: "pan,wheel_zoom,resize,preview"
   legend: false
 }
 

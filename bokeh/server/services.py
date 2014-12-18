@@ -1,9 +1,9 @@
-import subprocess
-import os
-from os.path import join, dirname
-import sys
+
 import json
+import os
 import signal
+import subprocess
+import sys
 
 class ManagedProcess(object):
     def __init__(self, args, name, pidfilename,
@@ -13,6 +13,7 @@ class ManagedProcess(object):
         self.pidfilename = pidfilename
         data = self.read_pidfile()
         pid = data.get(name)
+
         if pid and kill_old:
             try:
                 os.kill(pid, signal.SIGINT)
@@ -20,14 +21,13 @@ class ManagedProcess(object):
                 #this is ok, just means process is not running
                 pass
         elif pid and not kill_old:
-            raise Exception, "proces %s is running on PID %s" % (name, pid)
-        if stdout is None: stdout = subprocess.PIPE
-        if stderr is None: stderr = subprocess.PIPE
-        if stdin is None: stdin = subprocess.PIPE
-        self.proc = subprocess.Popen(args,
-                                     stdout=stdout,
-                                     stderr=stderr,
-                                     stdin=stdin)
+            raise Exception("process %s is running on PID %s" % (name, pid))
+
+        try:
+            self.proc = subprocess.Popen(args, stdout=stdout, stderr=stderr, stdin=stdin)
+        except OSError as error:
+            raise OSError(error.errno, "unable to execute: %s" % " ".join(args))
+
         self.add_to_pidfile()
         self.closed = False
 
@@ -58,11 +58,12 @@ class ManagedProcess(object):
             self.proc.kill()
             self.proc.communicate()
             self.remove_from_pidfile()
+            self.closed = True
 
 
-
-def start_redis(pidfilename, port, data_dir, loglevel="notice",
-                data_file='redis.db', save=True):
+def start_redis(pidfilename, port, data_dir, loglevel="warning",
+                data_file='redis.db', save=True,
+                stdout=sys.stdout, stderr=sys.stderr):
     base_config = os.path.join(os.path.dirname(__file__), 'redis.conf')
     with open(base_config) as f:
         redisconf = f.read()
@@ -74,9 +75,10 @@ def start_redis(pidfilename, port, data_dir, loglevel="notice",
                              'loglevel' : loglevel,
                              'save' : savestr}
     mproc = ManagedProcess(['redis-server', '-'], 'redis', pidfilename,
-                           stdout=sys.stdout,
-                           stderr=sys.stderr
+                           stdout=stdout,
+                           stderr=stderr,
+                           stdin=subprocess.PIPE
                            )
-    mproc.proc.stdin.write(redisconf)
+    mproc.proc.stdin.write(redisconf.encode())
     mproc.proc.stdin.close()
     return mproc

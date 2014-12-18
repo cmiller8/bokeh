@@ -1,63 +1,23 @@
-
 define [
   "underscore",
+  "rbush",
   "renderer/properties",
   "./glyph",
-], (_, Properties, Glyph) ->
-
-  glyph_properties = Properties.glyph_properties
-  line_properties  = Properties.line_properties
-  fill_properties  = Properties.fill_properties
+], (_, rbush, Properties, Glyph) ->
 
   class RectView extends Glyph.View
 
-    initialize: (options) ->
-      super(options)
-      ##duped in many classes
-      @glyph_props = @init_glyph(@mget('glyphspec'))
-      if @mget('selection_glyphspec')
-        spec = _.extend({}, @mget('glyphspec'), @mget('selection_glyphspec'))
-        @selection_glyphprops = @init_glyph(spec)
-      if @mget('nonselection_glyphspec')
-        spec = _.extend({}, @mget('glyphspec'), @mget('nonselection_glyphspec'))
-        @nonselection_glyphprops = @init_glyph(spec)
-      ##duped in many classes
-      @do_fill   = @glyph_props.fill_properties.do_fill
-      @do_stroke = @glyph_props.line_properties.do_stroke
+    _fields: ['x', 'y', 'width', 'height', 'angle']
+    _properties: ['line', 'fill']
 
-    init_glyph: (glyphspec) ->
-      fill_props = new fill_properties(@, glyphspec)
-      line_props = new line_properties(@, glyphspec)
-      glyph_props = new glyph_properties(
-        @,
-        glyphspec,
-        ['x', 'y', 'width', 'height', 'angle'],
-        {
-          fill_properties: new fill_properties(@, glyphspec),
-          line_properties: new line_properties(@, glyphspec)
-        }
-      )
-      return glyph_props
-
-    _set_data: (@data) ->
-      @x = @glyph_props.v_select('x', data)
-      @y = @glyph_props.v_select('y', data)
-      # TODO (bev) handle degrees in addition to radians
-      angles = @glyph_props.v_select('angle', data)
-      @angle = (-angle for angle in angles)
-
-
-      #duped
-      @selected_mask = new Uint8Array(data.length)
-      for i in [0..@selected_mask.length-1]
-        @selected_mask[i] = false
     _map_data: () ->
-      [sxi, syi] = @plot_view.map_to_screen(@x, @glyph_props.x.units, @y, @glyph_props.y.units)
-      @sw = @distance(@data, 'x', 'width', 'center')
-      @sh = @distance(@data, 'y', 'height', 'center')
+      [sxi, syi] = @renderer.map_to_screen(@x, @glyph.x.units, @y, @glyph.y.units)
+
+      @sw = @distance_vector('x', 'width', 'center', @mget('dilate'))
+      @sh = @distance_vector('y', 'height', 'center', @mget('dilate'))
       @sx = new Array(sxi.length)
       @sy = new Array(sxi.length)
-      for i in [0..sxi.length-1]
+      for i in [0...sxi.length]
         if Math.abs(sxi[i]-@sw[i]) < 2
           @sx[i] = Math.round(sxi[i])
         else
@@ -66,172 +26,155 @@ define [
           @sy[i] = Math.round(syi[i])
         else
           @sy[i] = syi[i]
+      @max_width = _.max(@width)
+      @max_height = _.max(@height)
 
-    _render: () ->
-      @_map_data()
-      ctx = @plot_view.ctx
+    _set_data: () ->
+      @index = rbush()
+      pts = []
+      for i in [0...@x.length]
+        if not isNaN(@x[i] + @y[i])
+          pts.push([@x[i], @y[i], @x[i], @y[i], {'i': i}])
+      @index.load(pts)
 
-      #duped
-      selected = @mget_obj('data_source').get('selected')
-      for idx in selected
-        @selected_mask[idx] = true
+    _render: (ctx, indices, sx=@sx, sy=@sy, sw=@sw, sh=@sh) ->
+      if @props.fill.do_fill
+        for i in indices
+          if isNaN(sx[i] + sy[i] + sw[i] + sh[i] + @angle[i])
+            continue
 
-      ctx.save()
-      if @glyph_props.fast_path
-        @_fast_path(ctx)
-      else
-        ##duped in many classes
-        if selected and selected.length and @nonselection_glyphprops
-          if @selection_glyphprops
-            props =  @selection_glyphprops
+          #no need to test the return value, we call fillRect for every glyph anyway
+          @props.fill.set_vectorize(ctx, i)
+
+          if @angle[i]
+            ctx.translate(sx[i], sy[i])
+            ctx.rotate(@angle[i])
+            ctx.fillRect(-sw[i]/2, -sh[i]/2, sw[i], sh[i])
+            ctx.rotate(-@angle[i])
+            ctx.translate(-sx[i], -sy[i])
           else
-            props = @glyph_props
-          @_full_path(ctx, props, 'selected')
-          @_full_path(ctx, @nonselection_glyphprops, 'unselected')
-        else
-          @_full_path(ctx)
-        ##duped in many classes
-      ctx.restore()
+            ctx.fillRect(sx[i]-sw[i]/2, sy[i]-sh[i]/2, sw[i], sh[i])
 
-    _fast_path: (ctx) ->
-      if @do_fill
-        @glyph_props.fill_properties.set(ctx, @glyph_props)
+      if @props.line.do_stroke
         ctx.beginPath()
-        for i in [0..@sx.length-1]
-          if isNaN(@sx[i] + @sy[i] + @sw[i] + @sh[i] + @angle[i])
+
+        for i in indices
+
+          if isNaN(sx[i] + sy[i] + sw[i] + sh[i] + @angle[i])
+            continue
+
+          # fillRect does not fill zero-height or -width rects, but rect(...)
+          # does seem to stroke them (1px wide or tall). Explicitly ignore rects
+          # with zero width or height to be consistent
+          if sw[i]==0 or sh[i]==0
             continue
 
           if @angle[i]
-            ctx.translate(@sx[i], @sy[i])
+            ctx.translate(sx[i], sy[i])
             ctx.rotate(@angle[i])
-            ctx.rect(-@sw[i]/2, -@sh[i]/2, @sw[i], @sh[i])
+            ctx.rect(-sw[i]/2, -sh[i]/2, sw[i], sh[i])
             ctx.rotate(-@angle[i])
-            ctx.translate(-@sx[i], -@sy[i])
+            ctx.translate(-sx[i], -sy[i])
           else
-            ctx.rect(@sx[i]-@sw[i]/2, @sy[i]-@sh[i]/2, @sw[i], @sh[i])
+            ctx.rect(sx[i]-sw[i]/2, sy[i]-sh[i]/2, sw[i], sh[i])
 
-        ctx.fill()
-
-      if @do_stroke
-        @glyph_props.line_properties.set(ctx, @glyph_props)
-        ctx.beginPath()
-        for i in [0..@sx.length-1]
-          if isNaN(@sx[i] + @sy[i] + @sw[i] + @sh[i] + @angle[i])
-            continue
-
-          if @angle[i]
-            ctx.translate(@sx[i], @sy[i])
-            ctx.rotate(@angle[i])
-            ctx.rect(-@sw[i]/2, -@sh[i]/2, @sw[i], @sh[i])
-            ctx.rotate(-@angle[i])
-            ctx.translate(-@sx[i], -@sy[i])
-          else
-            ctx.rect(@sx[i]-@sw[i]/2, @sy[i]-@sh[i]/2, @sw[i], @sh[i])
+          @props.line.set_vectorize(ctx, i)
+          ctx.stroke()
+          ctx.beginPath()
 
         ctx.stroke()
 
-    draw_legend: (ctx, x1, x2, y1, y2) ->
-      ## dummy legend function just draws a circle.. this way
-      ## even if we have a differnet glyph shape, at least we get the
-      ## right colors present
-      glyph_props = @glyph_props
-      line_props = glyph_props.line_properties
-      fill_props = glyph_props.fill_properties
-      ctx.save()
+    _hit_rect: (geometry) ->
+      [x0, x1] = @renderer.xmapper.v_map_from_target([geometry.vx0, geometry.vx1])
+      [y0, y1] = @renderer.ymapper.v_map_from_target([geometry.vy0, geometry.vy1])
 
-      reference_point = @get_reference_point()
-      if reference_point?
-        glyph_settings = reference_point
-        data_w = @distance([reference_point], 'x', 'width', 'center')[0]
-        data_h = @distance([reference_point], 'y', 'height', 'center')[0]
+      return (x[4].i for x in @index.search([x0, y0, x1, y1]))
+
+    _hit_point: (geometry) ->
+      [vx, vy] = [geometry.vx, geometry.vy]
+      x = @renderer.xmapper.map_from_target(vx)
+      y = @renderer.ymapper.map_from_target(vy)
+
+      # handle categorical cases
+      xcat = (typeof(x) == "string")
+      ycat = (typeof(y) == "string")
+
+      if xcat or ycat
+        candidates = (i for i in [0...@x.length])
+
       else
-        glyph_settings = glyph_props
-      border = line_props.select(line_props.line_width_name, glyph_settings)
+        # the dilation by a factor of two is a quick and easy way to make
+        # sure we cover cases with rotated
+        if @width_units == "screen" or xcat
+          max_width = @max_width
+          if xcat
+            max_width = @renderer.xmapper.map_to_target(max_width)
+          vx0 = vx - 2*max_width
+          vx1 = vx + 2*max_width
+          [x0, x1] = @renderer.xmapper.v_map_from_target([vx0, vx1])
+        else
+          x0 = x - 2*@max_width
+          x1 = x + 2*@max_width
 
-      ctx.beginPath()
-      w = Math.abs(x2-x1)
-      h = Math.abs(y2-y1)
-      w = w - 2*border
-      h = h - 2*border
-      if data_w?
-        w = if data_w > w then w else data_w
-      if data_h?
-        h = if data_h > h then h else data_h
-      x = (x1 + x2) / 2 - (w / 2)
-      y = (y1 + y2) / 2 - (h / 2)
-      ctx.rect(x, y, w, h)
-      fill_props.set(ctx, glyph_settings)
-      ctx.fill()
-      line_props.set(ctx, glyph_settings)
-      ctx.stroke()
+        if @height_units == "screen" or ycat
+          max_height = @max_height
+          if ycat
+            max_height = @renderer.ymapper.map_to_target(max_height)
+          vy0 = vy - 2*max_height
+          vy1 = vy + 2*max_height
+          [y0, y1] = @renderer.ymapper.v_map_from_target([vy0, vy1])
+        else
+          y0 = y - 2*@max_height
+          y1 = y + 2*@max_height
 
-      ctx.restore()
+        candidates = (pt[4].i for pt in @index.search([x0, y0, x1, y1]))
 
-    _full_path: (ctx, glyph_props, use_selection) ->
-      if not glyph_props
-        glyph_props = @glyph_props
-      for i in [0..@sx.length-1]
-        if isNaN(@sx[i] + @sy[i] + @sw[i] + @sh[i] + @angle[i])
-          continue
-        if use_selection == 'selected' and not @selected_mask[i]
-          continue
-        if use_selection == 'unselected' and @selected_mask[i]
-          continue
-        ctx.translate(@sx[i], @sy[i])
-        ctx.rotate(@angle[i])
+      hits = []
+      for i in candidates
+        if @width_units == "screen" or xcat
+          sx = @renderer.plot_view.canvas.vx_to_sx(vx)
+        else
+          sx = @renderer.plot_view.canvas.vx_to_sx(@renderer.xmapper.map_to_target(x))
 
-        ctx.beginPath()
-        ctx.rect(-@sw[i]/2, -@sh[i]/2, @sw[i], @sh[i])
+        if @height_units == "screen" or ycat
+          sy = @renderer.plot_view.canvas.vy_to_sy(vy)
+        else
+          sy = @renderer.plot_view.canvas.vy_to_sy(@renderer.ymapper.map_to_target(y))
 
-        if @do_fill
-          glyph_props.fill_properties.set(ctx, @data[i])
-          ctx.fill()
+        if @angle[i]
+          d = Math.sqrt(Math.pow((sx - @sx[i]), 2) + Math.pow((sy - @sy[i]),2))
+          s = Math.sin(-@angle[i])
+          c = Math.cos(-@angle[i])
+          px = c * (sx-@sx[i]) - s * (sy-@sy[i]) + @sx[i]
+          py = s * (sx-@sx[i]) + c * (sy-@sy[i]) + @sy[i]
+          sx = px
+          sy = py
+        width_in = Math.abs(@sx[i]-sx) <= @sw[i]/2
+        height_in = Math.abs(@sy[i]-sy) <= @sh[i]/2
 
-        if @do_stroke
-          glyph_props.line_properties.set(ctx, @data[i])
-          ctx.stroke()
+        if height_in and width_in
+          hits.push(i)
 
-        ctx.rotate(-@angle[i])
-        ctx.translate(-@sx[i], -@sy[i])
+      return hits
 
-    ##duped
-    select: (xscreenbounds, yscreenbounds) ->
-      xscreenbounds = [@plot_view.view_state.sx_to_device(xscreenbounds[0]),
-        @plot_view.view_state.sx_to_device(xscreenbounds[1])]
-      yscreenbounds = [@plot_view.view_state.sy_to_device(yscreenbounds[0]),
-        @plot_view.view_state.sy_to_device(yscreenbounds[1])]
-      xscreenbounds = [_.min(xscreenbounds), _.max(xscreenbounds)]
-      yscreenbounds = [_.min(yscreenbounds), _.max(yscreenbounds)]
-      selected = []
-      for i in [0..@sx.length-1]
-        if xscreenbounds
-          if @sx[i] < xscreenbounds[0] or @sx[i] > xscreenbounds[1]
-            continue
-        if yscreenbounds
-          if @sy[i] < yscreenbounds[0] or @sy[i] > yscreenbounds[1]
-            continue
-        selected.push(i)
-       return selected
+    draw_legend: (ctx, x0, x1, y0, y1) ->
+      @_generic_area_legend(ctx, x0, x1, y0, y1)
 
   class Rect extends Glyph.Model
     default_view: RectView
-    type: 'Glyph'
+    type: 'Rect'
 
-    display_defaults: () ->
-      return _.extend(super(), {
-        fill_color: 'gray'
-        fill_alpha: 1.0
-        line_color: 'red'
-        line_width: 1
-        line_alpha: 1.0
-        line_join: 'miter'
-        line_cap: 'butt'
-        line_dash: []
-        line_dash_offset: 0
+    display_defaults: ->
+      return _.extend {}, super(), @line_defaults, @fill_defaults, {
         angle: 0.0
-      })
+        dilate: false
+      }
+
+  class Rects extends Glyph.Collection
+    model: Rect
 
   return {
-    "Model": Rect,
-    "View": RectView,
+    Model: Rect
+    View: RectView
+    Collection: new Rects()
   }

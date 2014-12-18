@@ -2,13 +2,17 @@
 define [
   "require",
   "./base"
-], (require, base) ->
+  "./logging"
+], (require, base, Logging) ->
+
+  logger = Logging.logger
 
   load_models = (modelspecs)->
     # First we identify which model jsons correspond to new models,
     # and which ones are updates.
-    # For new models we instantiate the models, add them
-    # to their collections and call dinitialize.
+    # For new models we construct the models, add them
+    # to their collections (with option to defer initialization)
+    # and call initialize manually
     # For existing models we update
     # their attributes
     # ####Parameters
@@ -37,10 +41,12 @@ define [
 
     Collections = require("./base").Collections
 
+    logger.debug("load_models: start")
+
     for model in modelspecs
       coll = Collections(model['type'])
       attrs = model['attributes']
-      if coll and  coll.get(attrs['id'])
+      if coll and coll.get(attrs['id'])
         oldspecs.push([coll, attrs])
       else
         newspecs.push([coll, attrs])
@@ -49,13 +55,17 @@ define [
     for coll_attrs in newspecs
       [coll, attrs] = coll_attrs
       if coll
-        coll.add(attrs, {'silent' : true})
+        coll.add(attrs, {'silent' : true, 'defer_initialization' : true})
 
-    # call deferred initialize on all new models
+    logger.debug("load_models: starting deferred initializations")
+
+    # call deferred initialization on all new models
     for coll_attrs in newspecs
       [coll, attrs] = coll_attrs
       if coll
-        coll.get(attrs['id']).dinitialize(attrs)
+        coll.get(attrs['id']).initialize(attrs)
+
+    logger.debug("load_models: finished deferred initializations")
 
     # trigger add events on all new models
     for coll_attrs in newspecs
@@ -64,10 +74,12 @@ define [
         model = coll.get(attrs.id)
         model.trigger('add', model, coll, {});
 
-    # set attributes on old models silently
+    # set attributes on old models
     for coll_attrs in oldspecs
       [coll, attrs] = coll_attrs
       if coll
         coll.get(attrs['id']).set(attrs)
-    return null
 
+    logger.debug("load_models: finish")
+
+    return null

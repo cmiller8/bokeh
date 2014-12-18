@@ -3,13 +3,10 @@ define [
   "underscore",
   "common/has_parent",
   "common/plot_widget",
+  "common/collection",
   "common/textutils",
   "renderer/properties",
-], (_, HasParent, PlotWidget, textutils, Properties) ->
-
-  glyph_properties = Properties.glyph_properties
-  line_properties  = Properties.line_properties
-  text_properties  = Properties.text_properties
+], (_, HasParent, PlotWidget, Collection, textutils, properties) ->
 
   # Legends:
   #
@@ -33,20 +30,13 @@ define [
   class LegendView extends PlotWidget
     initialize: (options) ->
       super(options)
-      @label_props = new text_properties(@, @model, 'label_')
-      @border_props = new line_properties(@, @model, 'border_')
-      if @mget('legend_names')
-        @legend_names = @mget('legend_names')
-      else
-        @legends = @mget('legends')
-        @legend_names =_.keys(@mget('legends'))
-      @calc_dims()
-
-    delegateEvents: (events) ->
-      super(events)
-      @listenTo(@plot_view.view_state, 'change', @calc_dims)
+      @label_props = new properties.Text(@, 'label_')
+      @border_props = new properties.Line(@, 'border_')
+      @need_calc_dims = true
+      @listenTo(@plot_model.solver, 'layout_update', () -> @need_calc_dims = true)
 
     calc_dims: (options) ->
+      legend_names = (legend_name for [legend_name, glyphs] in @mget("legends"))
       label_height = @mget('label_height')
       @glyph_height = @mget('glyph_height')
       label_width = @mget('label_width')
@@ -55,12 +45,11 @@ define [
       @label_height = _.max([textutils.getTextHeight(@label_props.font(@)), label_height, @glyph_height])
       @legend_height = @label_height
       #add legend spacing
-      @legend_height = @legend_names.length * @legend_height + (1 + @legend_names.length) * legend_spacing
-      ctx = @plot_view.ctx
-
+      @legend_height = legend_names.length * @legend_height + (1 + legend_names.length) * legend_spacing
+      ctx = @plot_view.canvas_view.ctx
       ctx.save()
       @label_props.set(ctx, @)
-      text_widths = _.map(@legend_names, (txt) -> ctx.measureText(txt).width)
+      text_widths = _.map(legend_names, (txt) -> ctx.measureText(txt).width)
       ctx.restore()
 
       text_width = _.max(text_widths)
@@ -68,8 +57,8 @@ define [
       @legend_width = @label_width + @glyph_width + 3 * legend_spacing
       orientation = @mget('orientation')
       legend_padding = @mget('legend_padding')
-      h_range = @plot_view.view_state.get('inner_range_horizontal')
-      v_range = @plot_view.view_state.get('inner_range_vertical')
+      h_range = @plot_view.frame.get('h_range')
+      v_range = @plot_view.frame.get('v_range')
       if orientation == "top_right"
         x = h_range.get('end') - legend_padding - @legend_width
         y = v_range.get('end') - legend_padding
@@ -84,12 +73,15 @@ define [
         y = v_range.get('start') + legend_padding + @legend_height
       else if orientation == "absolute"
         [x,y] = @absolute_coords
-      x = @plot_view.view_state.sx_to_device(x)
-      y = @plot_view.view_state.sy_to_device(y)
+      x = @plot_view.canvas.vx_to_sx(x)
+      y = @plot_view.canvas.vy_to_sy(y)
       @box_coords = [x,y]
 
     render: () ->
-      ctx = @plot_view.ctx
+      if @need_calc_dims
+        @calc_dims()
+        @need_calc_dims = false
+      ctx = @plot_view.canvas_view.ctx
       ctx.save()
 
       ctx.fillStyle = @plot_model.get('background_fill')
@@ -100,9 +92,8 @@ define [
       )
       ctx.fill()
       ctx.stroke()
-      @label_props.set(ctx, @)
       legend_spacing = @mget('legend_spacing')
-      for legend_name, idx in @legend_names
+      for [legend_name, glyphs], idx in @mget("legends")
         yoffset = idx * @label_height
         yspacing = (1 + idx) * legend_spacing
         y = @box_coords[1] +  @label_height / 2.0 + yoffset + yspacing
@@ -111,10 +102,11 @@ define [
         x2 = x1 + @glyph_width
         y1 = @box_coords[1] + yoffset + yspacing
         y2 = y1 + @glyph_height
+        @label_props.set(ctx, @)
         ctx.fillText(legend_name, x, y)
-        for renderer in @model.resolve_ref(@legends[legend_name])
+        for renderer in @model.resolve_ref(glyphs)
           view = @plot_view.renderers[renderer.id]
-          view.draw_legend(ctx, x1,x2,y1,y2)
+          view.draw_legend(ctx, x1, x2, y1, y2)
 
       ctx.restore()
 
@@ -122,8 +114,13 @@ define [
     default_view: LegendView
     type: 'Legend'
 
-    display_defaults: () ->
-      return {
+    defaults: ->
+      return _.extend {}, super(), {
+        legends: []
+      }
+
+    display_defaults: ->
+      return _.extend {}, super(), {
         level: 'overlay'
 
         border_line_color: 'black'
@@ -140,7 +137,7 @@ define [
         label_text_font_style: "normal"
         label_text_color: "#444444"
         label_text_alpha: 1.0
-        label_text_align: "center"
+        label_text_align: "left"
         label_text_baseline: "middle"
 
         glyph_height: 20
@@ -150,12 +147,10 @@ define [
         legend_padding: 10
         legend_spacing: 3
         orientation: "top_right"
-        label_text_align: "left"
-        label_text_baseline: "middle"
         datapoint: null
       }
 
-  class Legends extends Backbone.Collection
+  class Legends extends Collection
     model: Legend
 
   return {

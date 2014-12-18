@@ -1,8 +1,10 @@
+# The plot server must be running
+# Go to http://localhost:5006/bokeh to view this plot
 
 import numpy as np
 from scipy.integrate import odeint
-from bokeh.plotting import *
 
+from bokeh.plotting import *
 
 sigma = 10
 rho = 28
@@ -17,7 +19,7 @@ def lorenz(xyz, t):
     return [x_dot, y_dot, z_dot]
 
 initial = (-10, -7, 35)
-t = np.arange(0, 100, 0.001)
+t = np.arange(0, 100, 0.006)
 
 solution = odeint(lorenz, initial, t)
 
@@ -28,10 +30,11 @@ xprime = np.cos(theta) * x - np.sin(theta) * y
 
 colors = ["#C6DBEF", "#9ECAE1", "#6BAED6", "#4292C6", "#2171B5", "#08519C", "#08306B",]
 
-output_server("lorenz.py example")
+output_server("lorenz")
 
-multi_line(np.array_split(xprime, 7), np.array_split(z, 7),
-           line_color=colors, line_alpha=0.8, line_width=1.5,
-           tools="pan,zoom,resize", title="lorenz example")
+p = figure(title="lorenz example")
 
-show()  # open a browser
+p.multi_line(np.array_split(xprime, 7), np.array_split(z, 7),
+           line_color=colors, line_alpha=0.8, line_width=1.5)
+
+show(p)  # open a browser

@@ -1,31 +1,32 @@
 define [
+    "underscore",
+    "jquery",
     "common/base",
     "../serverutils",
     "common/continuum_view",
+    "common/collection",
     "./userdocstemplate",
     "./documentationtemplate",
     "./wrappertemplate",
     "common/has_parent",
     "common/build_views",
     "common/load_models",
-],  (base, serverutils, continuum_view,
+], (_, $, base, serverutils, ContinuumView, Collection,
     userdocstemplate, documentationtemplate,
-    wrappertemplate, HasParent, build_views, load_models
-    ) ->
+    wrappertemplate, HasParent, build_views, load_models) ->
+
   exports = {}
-  ContinuumView = continuum_view.View
   utility = serverutils.utility
 
   class DocView extends ContinuumView
     template : wrappertemplate
     attributes :
-      class : 'accordion-group'
+      class : 'panel-group'
     events :
       "click .bokehdoclabel" : "loaddoc"
       "click .bokehdelete" : "deldoc"
 
     deldoc : (e) ->
-      console.log('foo')
       e.preventDefault()
       @model.destroy()
       return false
@@ -42,11 +43,23 @@ define [
       @listenTo(@model, 'loaded', @render)
 
     render_init : () ->
-      html = @template(model : @model, bodyid : _.uniqueId())
+      # XXX: this code is executed only by server so we can safely
+      # assume that window.$ points to server's jquery. We have to
+      # use this instead of 'bootstrap/collapse', because server's
+      # styles aren't prefixed with bs-bk-, as bokehjs does for
+      # widgets, etc.
+      #jquery = window.$
+
+      #html = jquery(@template({model: @model, bodyid: _.uniqueId()}))
+      #html.find(".collapse")
+      #    .collapse({toggle: false})
+      #    .on("show.bs.collapse", () => @loaddoc())
+
+      html = @template({model: @model, bodyid: _.uniqueId()})
       @$el.html(html)
 
     render : () ->
-      plot_context = @model.get_obj('plot_context')
+      plot_context = @model.get('plot_context')
       @plot_context_view = new plot_context.default_view(
         model : plot_context
       )
@@ -70,7 +83,7 @@ define [
       @listenTo(@collection, 'remove', @render)
       @listenTo(@collection, 'add', (model, collection, options) =>
         @listenTo(model, 'loaded', () =>
-          @listenTo(model.get_obj('plot_context'), 'change', () =>
+          @listenTo(model.get('plot_context'), 'change', () =>
             @trigger('show')
           )
         )
@@ -97,11 +110,13 @@ define [
   class Doc extends HasParent
     default_view : DocView
     idAttribute : 'docid'
-    defaults :
-      docid : null
-      title : null
-      plot_context : null
-      apikey : null
+    defaults: ->
+      return _.extend {}, super(), {
+        docid: null
+        title: null
+        plot_context: null
+        apikey: null
+      }
 
     sync : () ->
 
@@ -131,7 +146,7 @@ define [
         #do the websocket stuff later
       )
 
-  class UserDocs extends Backbone.Collection
+  class UserDocs extends Collection
     model : Doc
     subscribe : (wswrapper, username) ->
       wswrapper.subscribe("bokehuser:#{username}", null)
@@ -144,11 +159,12 @@ define [
     fetch : (options) ->
       if _.isUndefined(options )
         options = {}
-      resp = response = $.get('/bokeh/userinfo/', {})
+      url = base.Config.prefix + "bokeh/userinfo/"
+      resp = response = $.get(url, {})
       resp.done((data) =>
         docs = data['docs']
         if options.update
-          @update(docs, options)
+          @set(docs, options)
         else
           @reset(docs, options)
       )

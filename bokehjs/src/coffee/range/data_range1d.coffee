@@ -1,9 +1,9 @@
 
 define [
   "underscore",
-  "backbone",
+  "common/collection",
   "range/range1d"
-], (_, Backbone, Range1d) ->
+], (_, Collection, Range1d) ->
 
   class DataRange1d extends Range1d.Model
     type: 'DataRange1d'
@@ -11,27 +11,18 @@ define [
     _get_minmax: () ->
       columns = []
       for source in @get('sources')
-        sourceobj = @resolve_ref(source['ref'])
+        sourceobj = @resolve_ref(source['source'])
         for colname in source['columns']
-          columns.push(sourceobj.getcolumn(colname))
-      columns = _.reduce(columns, ((x, y) -> return x.concat(y)), [])
+          columns.push(sourceobj.get_column(colname))
+      columns = _.flatten(columns)
       columns = _.filter(columns, (x) -> typeof(x) != "string")
-      if not _.isArray(columns[0])
-        columns = _.reject(columns, (x) -> isNaN(x))
-        [min, max] = [_.min(columns), _.max(columns)]
-      else
-        maxs = Array(columns.length)
-        mins = Array(columns.length)
-        for i in [0..columns.length-1]
-          columns[i] = _.reject(columns[i], (x) -> isNaN(x))
-          maxs[i] = _.max(columns[i])
-          mins[i] = _.min(columns[i])
-        [min, max] = [_.min(mins), _.max(maxs)]
+      columns = _.reject(columns, (x) -> isNaN(x))
+      [min, max] = [_.min(columns), _.max(columns)]
       if max != min
         span = (max - min) * (1 + @get('rangepadding'))
       else
         if max != 0
-          span = max * (1 + @get('rangepadding'))
+          span = Math.abs(max) * (1 + @get('rangepadding'))
         else
           span = 2
       center = (max + min) / 2.0
@@ -56,11 +47,11 @@ define [
     _set_end: (end) ->
       @set('_end', end)
 
-    dinitialize: (attrs, options) ->
+    initialize: (attrs, options) ->
       @register_property('minmax', @_get_minmax, true)
       @add_dependencies('minmax', this, ['sources'], ['rangepadding'])
-      for source in @get('sources')
-        source = @resolve_ref(source.ref)
+      for columns_ref in @get('sources')
+        source = @resolve_ref(columns_ref.source)
         @add_dependencies('minmax', source, 'data')
       @register_property('start', @_get_start, true)
       @register_setter('start', @_set_start)
@@ -70,13 +61,13 @@ define [
       @add_dependencies('end', this, ['minmax', '_end'])
       super(attrs, options)
 
-    defaults: () ->
-      return {
+    defaults: ->
+      return _.extend {}, super(), {
         sources: []
         rangepadding: 0.1
       }
 
-  class DataRange1ds extends Backbone.Collection
+  class DataRange1ds extends Collection
     model: DataRange1d
 
   return {

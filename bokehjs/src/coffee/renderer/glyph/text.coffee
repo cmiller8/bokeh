@@ -1,100 +1,61 @@
-
 define [
   "underscore",
-  "renderer/properties",
   "./glyph",
-], (_, Properties, Glyph) ->
-
-  glyph_properties = Properties.glyph_properties
-  text_properties  = Properties.text_properties
+], (_, Glyph) ->
 
   class TextView extends Glyph.View
 
-    initialize: (options) ->
-      glyphspec = @mget('glyphspec')
-      @glyph_props = new glyph_properties(
-        @,
-        glyphspec,
-        ['x', 'y', 'angle', 'text:string'],
-        {
-          text_properties: new text_properties(@, glyphspec)
-        }
-      )
+    _fields: ['x', 'y', 'angle', 'text:string', 'x_offset', 'y_offset']
+    _properties: ['text']
 
-      super(options)
+    _map_data: () ->
+      [@sx, @sy] = @renderer.map_to_screen(@x, @glyph.x.units, @y, @glyph.y.units)
 
-    _set_data: (@data) ->
-      @x = @glyph_props.v_select('x', data)
-      @y = @glyph_props.v_select('y', data)
-      angles = (@glyph_props.select("angle", obj) for obj in data) # TODO deg/rad
-      @angle = (-angle for angle in angles)
-      @text = @glyph_props.v_select("text", data)
+      @sx_offset = @distance_vector('x', 'x_offset', 'edge')
+      @sy_offset = @distance_vector('y', 'y_offset', 'edge')
 
-    _render: () ->
-      [@sx, @sy] = @plot_view.map_to_screen(@x, @glyph_props.x.units, @y, @glyph_props.y.units)
-
-      ctx = @plot_view.ctx
-
-      ctx.save()
-      if @glyph_props.fast_path
-        @_fast_path(ctx)
-      else
-        @_full_path(ctx)
-      ctx.restore()
-
-    _fast_path: (ctx) ->
-      @glyph_props.text_properties.set(ctx, @glyph_props)
-      for i in [0..@sx.length-1]
-        if isNaN(@sx[i] + @sy[i] + @angle[i])
+    _render: (ctx, indices) ->
+      for i in indices
+        if isNaN(@sx[i] + @sy[i] + @sx_offset[i] + @sy_offset[i] + @angle[i]) or not @text[i]?
           continue
 
-        if angle[i]
-          ctx.translate(@sx[i], @sy[i])
-          ctx.rotate(@angle[i])
-          ctx.fillText(@text[i], 0, 0)
-          ctx.rotate(-@angle[i])
-          ctx.translate(-@sx[i], -@sy[i])
-        else
-          ctx.fillText(text[i], @sx[i], @sy[i])
-
-    _full_path: (ctx) ->
-      for i in [0..@sx.length-1]
-        if isNaN(@sx[i] + @sy[i] + @angle[i])
-          continue
-
-        ctx.translate(@sx[i], @sy[i])
+        ctx.save()
+        ctx.translate(@sx[i] + @sx_offset[i], @sy[i] + @sy_offset[i])
         ctx.rotate(@angle[i])
 
-        @glyph_props.text_properties.set(ctx, @data[i])
+        @props.text.set_vectorize(ctx, i)
         ctx.fillText(@text[i], 0, 0)
-
-        ctx.rotate(-@angle[i])
-        ctx.translate(-@sx[i], -@sy[i])
+        ctx.restore()
 
     draw_legend: (ctx, x1, x2, y1, y2) ->
-      glyph_props = @glyph_props
-      text_props = glyph_props.text_properties
       ctx.save()
       reference_point = @get_reference_point()
       if reference_point?
         glyph_settings = reference_point
       else
-        glyph_settings = glyph_props
+        glyph_settings = @props
+      text_props = @props.text
       text_props.set(ctx, glyph_settings)
-      #override some features so we fit inside the legend
+      # override some features so we fit inside the legend
       ctx.font = text_props.font(12)
       ctx.textAlign = "right"
       ctx.textBaseline = "middle"
       ctx.fillText("txt", x2, (y1+y2)/2)
-
       ctx.restore()
 
   class Text extends Glyph.Model
     default_view: TextView
-    type: 'Glyph'
+    type: 'Text'
 
-    display_defaults: () ->
-      return _.extend(super(), {
+    defaults: ->
+      return _.extend {}, super(), {
+        angle: 0
+        x_offset: {value: 0, units: "screen"}
+        y_offset: {value: 0, units: "screen"}
+      }
+
+    display_defaults: ->
+      return _.extend {}, super(), {
         text_font: "helvetica"
         text_font_size: "12pt"
         text_font_style: "normal"
@@ -102,9 +63,13 @@ define [
         text_alpha: 1.0
         text_align: "left"
         text_baseline: "bottom"
-      })
+      }
+
+  class Texts extends Glyph.Collection
+    model: Text
 
   return {
-    "Model": Text,
-    "View": TextView,
+    Model: Text
+    View: TextView
+    Collection: new Texts()
   }

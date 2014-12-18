@@ -1,41 +1,34 @@
-
-from numpy import cumprod, linspace, random
 import time
 
-from bokeh.sampledata.stocks import AAPL, FB, GOOG, IBM, MSFT
+from numpy import cumprod, linspace, random
+
 from bokeh.plotting import *
-from bokeh.objects import GridPlot
-
-
-output_file("correlation.html", title="correlation.py example")
-
-hold()
 
 num_points = 300
 
 now = time.time()
-dt = 24*3600 # days
-dates = linspace(now, now + num_points*dt, num_points)
+dt = 24*3600 # days in seconds
+dates = linspace(now, now + num_points*dt, num_points) * 1000 # times in ms
 acme = cumprod(random.lognormal(0.0, 0.04, size=num_points))
 choam = cumprod(random.lognormal(0.0, 0.04, size=num_points))
 
-scatter(
-    acme, choam,
-    color='#A6CEE3', radius=3,
-    tools="pan,zoom,resize", legend='close',
-)
+TOOLS = "pan,wheel_zoom,box_zoom,reset,save"
 
-curplot().title = "ACME / CHOAM Correlations"
-grid().grid_line_alpha=0.3
+output_file("correlation.html", title="correlation.py example")
 
-figure()
-line(dates, acme,
-     x_axis_type = "datetime",
-     color='#1F78B4', tools="pan,zoom,resize", legend='ACME', name="correlation")
-line(dates, choam, color='#FB9A99', legend='CHOAM')
+r = figure(x_axis_type = "datetime", tools=TOOLS)
 
-curplot().title = "Stock Returns"
-grid().grid_line_alpha=0.3
+r.line(dates, acme, color='#1F78B4', legend='ACME')
+r.line(dates, choam, color='#FB9A99', legend='CHOAM')
 
-show()  # open a browser
+r.title = "Stock Returns"
+r.grid.grid_line_alpha=0.3
 
+c = figure(tools=TOOLS)
+
+c.circle(acme, choam, color='#A6CEE3', legend='close')
+
+c.title = "ACME / CHOAM Correlations"
+c.grid.grid_line_alpha=0.3
+
+show(VBox(r, c))  # open a browser

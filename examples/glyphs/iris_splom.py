@@ -1,16 +1,17 @@
+from __future__ import print_function
 
-import os
 from math import pi
 
-from bokeh.sampledata.iris import flowers
-from bokeh.objects import (
-    ColumnDataSource, Glyph, Grid, GridPlot, LinearAxis, Plot,
-    DataRange1d, DataRange1d, PanTool, ZoomTool
+from bokeh.browserlib import view
+from bokeh.document import Document
+from bokeh.embed import file_html
+from bokeh.models.glyphs import Circle, Text
+from bokeh.models import (
+    BasicTicker, ColumnDataSource, Grid, GridPlot, LinearAxis,
+    DataRange1d, PanTool, Plot, WheelZoomTool
 )
-from bokeh.glyphs import Circle, Text
-from bokeh import session
-
-
+from bokeh.resources import INLINE
+from bokeh.sampledata.iris import flowers
 
 colormap = {'setosa': 'red', 'versicolor': 'green', 'virginica': 'blue'}
 
@@ -28,77 +29,71 @@ source = ColumnDataSource(
 )
 
 text_source = ColumnDataSource(
-    data=dict(center=[125])
+    data=dict(xcenter=[125], ycenter=[135])
 )
 
 xdr = DataRange1d(sources=[source.columns("petal_length", "petal_width", "sepal_length", "sepal_width")])
 ydr = DataRange1d(sources=[source.columns("petal_length", "petal_width", "sepal_length", "sepal_width")])
 
-pan = PanTool(dataranges=[xdr,ydr], dimensions=["x","y"])
-zoom = ZoomTool(dataranges=[xdr,ydr], dimensions=["x","y"])
-
 def make_plot(xname, yname, xax=False, yax=False, text=None):
     plot = Plot(
-        x_range=xdr, y_range=ydr, data_sources=[source], background_fill="#ffeedd",
-        width=250, height=250, border_fill='white', title="", border_symmetry="", min_border=2)
-    objs = []
+        x_range=xdr, y_range=ydr, background_fill="#efe8e2",
+        border_fill='white', title="", min_border=2, h_symmetry=False, v_symmetry=False,
+        plot_width=250, plot_height=250)
+
+    circle = Circle(x=xname, y=yname, fill_color="color", fill_alpha=0.2, size=4, line_color="color")
+    plot.add_glyph(source, circle)
+
+    xticker = BasicTicker()
     if xax:
-        xaxis = LinearAxis(plot=plot, dimension=0, location="bottom")
-        objs.append(xaxis)
+        xaxis = LinearAxis()
+        plot.add_layout(xaxis, 'below')
+        xticker = xaxis.ticker
+    plot.add_layout(Grid(dimension=0, ticker=xticker))
+
+    yticker = BasicTicker()
     if yax:
-        yaxis = LinearAxis(plot=plot, dimension=1, location="left")
-        objs.append(yaxis)
-    xgrid = Grid(plot=plot, dimension=0)
-    ygrid = Grid(plot=plot, dimension=1)
-    circle = Circle(x=xname, y=yname, fill_color="color", fill_alpha=0.2, radius=2, line_color="color")
-    circle_renderer = Glyph(
-        data_source = source,
-        xdata_range = xdr,
-        ydata_range = ydr,
-        glyph = circle,
-    )
-    plot.renderers.append(circle_renderer)
-    plot.tools = [pan, zoom]
+        yaxis = LinearAxis()
+        plot.add_layout(yaxis, 'left')
+        yticker = yaxis.ticker
+    plot.add_layout(Grid(dimension=1, ticker=yticker))
+
+    plot.add_tools(PanTool(), WheelZoomTool())
+
     if text:
         text = " ".join(text.split('_'))
         text = Text(
-            x={'field':'center', 'units':'screen'}, 
-            y={'field':'center', 'units':'screen'}, 
-            text=text, angle=pi/4, text_font_style="bold", text_baseline="top",
-            text_color="#ffaaaa", text_alpha=0.5, text_align="center", text_font_size="28pt")
-        text_renderer = Glyph(
-            data_source=text_source,
-            xdata_range = xdr,
-            ydata_range = ydr,
-            glyph = text,
+            x={'field':'xcenter', 'units':'screen'},
+            y={'field':'ycenter', 'units':'screen'},
+            text=[text], angle=pi/4, text_font_style="bold", text_baseline="top",
+            text_color="#ffaaaa", text_alpha=0.7, text_align="center", text_font_size="28pt"
         )
-        plot.data_sources.append(text_source)
-        plot.renderers.append(text_renderer)
-        objs.append(text_renderer)
-        objs.append(text_source)
-    return plot, objs + [circle_renderer, xgrid, ygrid]
+        plot.add_glyph(text_source, text)
 
-sess = session.HTMLFileSession("iris_splom.html")
-attrs = ["petal_length", "petal_width", "sepal_width", "sepal_length"]
+    return plot
 
+xattrs = ["petal_length", "petal_width", "sepal_width", "sepal_length"]
+yattrs = list(reversed(xattrs))
 plots = []
-for y in attrs:
+
+for y in yattrs:
     row = []
-    for x in attrs:
-        xax = (y == attrs[-1])
-        yax = (x == attrs[0])
+    for x in xattrs:
+        xax = (y == yattrs[-1])
+        yax = (x == xattrs[0])
         text = x if (x==y) else None
-        plot, objs = make_plot(x, y, xax, yax, text)
-        sess.add(plot, *objs)
+        plot = make_plot(x, y, xax, yax, text)
         row.append(plot)
     plots.append(row)
 
-grid = GridPlot(children=plots, name="iris_splom")
+grid = GridPlot(children=plots, title="iris_splom")
 
-sess.add(source, xdr, ydr, pan, zoom)
-sess.add(grid)
-sess.plotcontext.children.append(grid)
-sess.save(js="relative", css="relative", rootdir=os.path.abspath("."))
+doc = Document()
+doc.add(grid)
 
-import webbrowser
-webbrowser.open("file://" + os.path.abspath("iris_splom.html"))
+if __name__ == "__main__":
+    filename = "iris_splom.html"
+    with open(filename, "w") as f:
+        f.write(file_html(doc, INLINE, "Iris Data SPLOM"))
+    print("Wrote %s" % filename)
+    view(filename)
